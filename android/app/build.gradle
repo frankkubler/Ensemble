@@ -59,7 +59,7 @@ android {
 
     defaultConfig {
         applicationId "com.collotsspot.ensemble"
-        minSdkVersion flutter.minSdkVersion
+        minSdkVersion 23
         targetSdk 35
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
