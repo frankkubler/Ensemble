@@ -1449,7 +1449,13 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   void _showFullscreenArt(BuildContext context, String? imageUrl) {
     if (imageUrl == null) return;
 
-    Navigator.of(context).push(
+    // Use the global navigator key instead of Navigator.of(context) because
+    // this widget lives inside an Overlay (GlobalPlayerOverlay) that has no
+    // Navigator ancestor, causing Navigator.of(context) to throw.
+    final navigator = navigationProvider.navigatorKey.currentState;
+    if (navigator == null) return;
+
+    navigator.push(
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black87,
@@ -1458,10 +1464,10 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
           return FadeTransition(
             opacity: animation,
             child: GestureDetector(
-              onTap: () => Navigator.of(context).pop(),
+              onTap: () => navigator.pop(),
               onVerticalDragEnd: (details) {
                 if (details.primaryVelocity != null && details.primaryVelocity!.abs() > 300) {
-                  Navigator.of(context).pop();
+                  navigator.pop();
                 }
               },
               child: Scaffold(
