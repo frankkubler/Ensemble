@@ -10,6 +10,59 @@ import '../sync_service.dart';
 import '../../providers/music_assistant_provider.dart';
 import '../../models/media_item.dart' as ma;
 
+/// Cache for Android Auto artwork to improve loading performance
+class AndroidAutoArtworkCache {
+  final Map<String, Uri> _cache = {};
+  final _logger = DebugLogger();
+
+  /// Precache artwork for a list of media items
+  Future<void> precacheCategory(
+      MusicAssistantProvider provider,
+      List<ma.MediaItem> items) async {
+    final futures = <Future<void>>[];
+    
+    for (final item in items.take(50)) {
+      final key = '${item.provider}|${item.itemId}';
+      if (!_cache.containsKey(key)) {
+        futures.add(() async {
+          try {
+            final url = provider.getImageUrl(item, size: 256);
+            if (url != null) {
+              final uri = Uri.tryParse(url);
+              if (uri != null) {
+                _cache[key] = uri;
+              }
+            }
+          } catch (e) {
+            _logger.log('AndroidAuto: Cache error for $key: $e');
+          }
+        }());
+      }
+      
+      // Process in batches to avoid overwhelming the system
+      if (futures.length >= 10) {
+        await Future.wait(futures);
+        futures.clear();
+      }
+    }
+    
+    // Process remaining
+    if (futures.isNotEmpty) {
+      await Future.wait(futures);
+    }
+  }
+
+  /// Get cached artwork URI
+  Uri? getCached(String provider, String itemId) {
+    return _cache['$provider|$itemId'];
+  }
+
+  /// Clear the cache
+  void clear() {
+    _cache.clear();
+  }
+}
+
 /// Custom AudioHandler for Ensemble that provides full control over
 /// notification actions and metadata updates.
 class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
@@ -46,6 +99,13 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   // Android Auto: subjects for subscribeToChildren
   final Map<String, BehaviorSubject<Map<String, dynamic>>> _autoChildrenSubjects = {};
+
+  // Android Auto: pagination constants
+  static const int _pageSize = 50;
+  static const int _maxItemsWithoutPagination = 200;
+
+  // Android Auto: artwork cache for faster loading
+  static final _artworkCache = AndroidAutoArtworkCache();
 
   // Custom control for switching players (uses stop action with custom icon)
   static const _switchPlayerControl = MediaControl(
@@ -336,6 +396,26 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   void setProvider(MusicAssistantProvider provider) {
     _autoProvider = provider;
     _logger.log('AndroidAuto: provider set');
+    
+    // Precache artwork for frequently accessed categories
+    _precacheArtwork(provider);
+  }
+
+  /// Precache artwork for top items to improve loading performance
+  Future<void> _precacheArtwork(MusicAssistantProvider provider) async {
+    try {
+      // Precache albums (top 50)
+      final albums = SyncService.instance.cachedAlbums.take(50).toList();
+      await _artworkCache.precacheCategory(provider, albums);
+      
+      // Precache artists (top 50)
+      final artists = SyncService.instance.cachedArtists.take(50).toList();
+      await _artworkCache.precacheCategory(provider, artists);
+      
+      _logger.log('AndroidAuto: Precached ${albums.length + artists.length} artworks');
+    } catch (e) {
+      _logger.log('AndroidAuto: Precache error (non-fatal): $e');
+    }
   }
 
   // Media ID constants — root categories
@@ -444,12 +524,89 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         return _autoBuildRadioList(provider);
 
       default:
+        // Load More pagination
+        if (parentMediaId.startsWith('load_more|')) {
+          return _autoBuildLoadMorePage(provider, parentMediaId);
+        }
         // Home row content (home|recent-albums, etc.)
         if (parentMediaId.startsWith('home|')) {
           return _autoBuildHomeRowContent(provider, parentMediaId.substring(5));
         }
         return _autoBuildDynamicChildren(provider, parentMediaId);
     }
+  }
+
+  /// Handle "Load More" pagination
+  Future<List<MediaItem>> _autoBuildLoadMorePage(
+      MusicAssistantProvider provider, String mediaId) async {
+    final parts = mediaId.split('|');
+    if (parts.length < 3) return [];
+    
+    final category = parts[1]; // 'albums' or 'artists'
+    final page = int.tryParse(parts[2]) ?? 0;
+    
+    if (category == 'albums') {
+      final albums = SyncService.instance.cachedAlbums;
+      final sortedAlbums = List<ma.Album>.from(albums)
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      
+      final start = page * _pageSize;
+      final end = (start + _pageSize).clamp(0, sortedAlbums.length);
+      
+      final items = <MediaItem>[];
+      for (int i = start; i < end; i++) {
+        final album = sortedAlbums[i];
+        items.add(MediaItem(
+          id: 'album_actions|${album.provider}|${album.itemId}',  // CHANGED: point to actions menu
+          title: album.name,
+          artist: album.artistsString,
+          artUri: _autoArtUriWithCache(provider, album),
+          playable: false,
+        ));
+      }
+      
+      // Add another "Load More" if needed
+      if (end < sortedAlbums.length) {
+        items.add(MediaItem(
+          id: 'load_more|albums|${page + 1}',
+          title: 'Load More (${sortedAlbums.length - end} remaining)',
+          playable: false,
+        ));
+      }
+      
+      return items;
+    } else if (category == 'artists') {
+      final artists = SyncService.instance.cachedArtists;
+      final sortedArtists = List<ma.Artist>.from(artists)
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      
+      final start = page * _pageSize;
+      final end = (start + _pageSize).clamp(0, sortedArtists.length);
+      
+      final items = <MediaItem>[];
+      for (int i = start; i < end; i++) {
+        final artist = sortedArtists[i];
+        items.add(MediaItem(
+          id: 'artist_actions|${artist.name}',  // CHANGED: point to actions menu
+          title: artist.name,
+          artUri: _autoArtUriWithCache(provider, artist),
+          playable: false,
+        ));
+      }
+      
+      // Add another "Load More" if needed
+      if (end < sortedArtists.length) {
+        items.add(MediaItem(
+          id: 'load_more|artists|${page + 1}',
+          title: 'Load More (${sortedArtists.length - end} remaining)',
+          playable: false,
+        ));
+      }
+      
+      return items;
+    }
+    
+    return [];
   }
 
   /// Route prefix-based dynamic media IDs (albums, playlists, artists, etc.)
@@ -470,6 +627,13 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       case 'artist':
         final name = parts.sublist(1).join('|');
         return _autoBuildArtistAlbums(provider, name);
+      case 'artist_actions':  // NEW: Actions menu for artists
+        final artistName = parts.sublist(1).join('|');
+        return _autoBuildArtistActions(provider, artistName);
+      case 'album_actions':  // NEW: Actions menu for albums
+        if (parts.length >= 3) {
+          return _autoBuildAlbumActions(provider, parts[1], parts[2]);
+        }
       case 'podcast':
         if (parts.length >= 3) {
           return _autoBuildPodcastEpisodes(provider, parts[1], parts[2]);
@@ -521,6 +685,74 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _logger.log('AndroidAuto: playFromMediaId $mediaId');
 
     try {
+      // --- NEW: Handle Priority 4 Smart Playback Actions ---
+      
+      // Shuffle Playlist
+      if (mediaId.startsWith('action_shuffle_playlist|')) {
+        final parts = mediaId.split('|');
+        if (parts.length >= 3) {
+          await _playPlaylistShuffle(provider, playerId, parts[1], parts[2]);
+        }
+        return;
+      }
+      
+      // Artist Radio
+      if (mediaId.startsWith('action_radio_artist|')) {
+        final artistName = mediaId.substring('action_radio_artist|'.length);
+        await _playArtistRadio(provider, playerId, artistName);
+        return;
+      }
+      
+      // Artist Shuffle
+      if (mediaId.startsWith('action_shuffle_artist|')) {
+        final artistName = mediaId.substring('action_shuffle_artist|'.length);
+        await _playArtistShuffle(provider, playerId, artistName);
+        return;
+      }
+      
+      // Play All Artist Tracks
+      if (mediaId.startsWith('action_play_artist|')) {
+        final artistName = mediaId.substring('action_play_artist|'.length);
+        await _playArtistAll(provider, playerId, artistName);
+        return;
+      }
+      
+      // Album Radio
+      if (mediaId.startsWith('action_radio_album|')) {
+        final parts = mediaId.split('|');
+        if (parts.length >= 3) {
+          await _playAlbumRadio(provider, playerId, parts[1], parts[2]);
+        }
+        return;
+      }
+      
+      // Album Shuffle
+      if (mediaId.startsWith('action_shuffle_album|')) {
+        final parts = mediaId.split('|');
+        if (parts.length >= 3) {
+          await _playAlbumShuffle(provider, playerId, parts[1], parts[2]);
+        }
+        return;
+      }
+      
+      // Play Album Normally
+      if (mediaId.startsWith('action_play_album|')) {
+        final parts = mediaId.split('|');
+        if (parts.length >= 3) {
+          final album = SyncService.instance.cachedAlbums.firstWhere(
+            (a) => a.provider == parts[1] && a.itemId == parts[2],
+            orElse: () => throw Exception('Album not found'),
+          );
+          if (provider.api == null) await provider.checkAndReconnect();
+          if (provider.api != null) {
+            await provider.api!.playAlbum(playerId, album);
+          }
+        }
+        return;
+      }
+      
+      // --- Existing handlers ---
+      
       if (mediaId.startsWith('track|')) {
         // Format: track|{tProvider}|{tItemId}|{ctxType}|{ctxProvider}|{ctxId}
         final parts = mediaId.split('|');
@@ -864,18 +1096,72 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         await provider.getPlaylistTracksWithCache(plProvider, plItemId);
     final ctxKey = 'plist|$plProvider|$plItemId';
     _autoTrackCache[ctxKey] = tracks;
-    return tracks.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
+    
+    final items = <MediaItem>[];
+    
+    // Add shuffle option at the top if more than 1 track
+    if (tracks.length > 1) {
+      items.add(MediaItem(
+        id: 'action_shuffle_playlist|$plProvider|$plItemId',
+        title: '🔀 Shuffle Playlist',
+        artist: 'Play ${tracks.length} tracks in random order',
+        playable: true,
+      ));
+    }
+    
+    // Add normal track listings
+    items.addAll(tracks.map((t) => _autoTrackItem(provider, t, ctxKey)));
+    
+    return items;
   }
 
   List<MediaItem> _autoBuildArtistList(MusicAssistantProvider provider) {
     final artists = SyncService.instance.cachedArtists;
     _logger.log('AndroidAuto: Artists: ${artists.length}');
-    return artists.map((a) => MediaItem(
-      id: 'artist|${a.name}',
-      title: a.name,
-      artUri: _autoArtUri(provider, a),
-      playable: false,
-    )).toList();
+    
+    // Sort alphabetically
+    final sortedArtists = List<ma.Artist>.from(artists)
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    
+    final items = <MediaItem>[];
+    
+    // If more than max items, paginate
+    if (sortedArtists.length > _maxItemsWithoutPagination) {
+      // Add first page with alphabetical separators
+      items.addAll(_buildItemsWithSeparators(
+        sortedArtists.take(_pageSize).toList(),
+        provider,
+        (artist) => MediaItem(
+          id: 'artist_actions|${artist.name}',  // CHANGED: point to actions menu
+          title: artist.name,
+          artUri: _autoArtUriWithCache(provider, artist),
+          playable: false,
+        ),
+        (artist) => artist.name,
+      ));
+      
+      // Add "Load More" button
+      items.add(MediaItem(
+        id: 'load_more|artists|1',
+        title: 'Load More (${sortedArtists.length - _pageSize} remaining)',
+        playable: false,
+      ));
+    } else {
+      // Show all with separators if reasonable count
+      items.addAll(_buildItemsWithSeparators(
+        sortedArtists,
+        provider,
+        (artist) => MediaItem(
+          id: 'artist_actions|${artist.name}',  // CHANGED: point to actions menu
+          title: artist.name,
+          artUri: _autoArtUriWithCache(provider, artist),
+          playable: false,
+        ),
+        (artist) => artist.name,
+      ));
+    }
+    
+    return items;
   }
 
   Future<List<MediaItem>> _autoBuildArtistAlbums(
@@ -895,16 +1181,157 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     )).toList();
   }
 
+  /// Build actions menu for artist (Play All, Radio, Shuffle, Browse Albums)
+  List<MediaItem> _autoBuildArtistActions(
+      MusicAssistantProvider provider, String artistName) {
+    _logger.log('AndroidAuto: Building artist actions for "$artistName"');
+    
+    // Find the artist for artwork
+    final artist = SyncService.instance.cachedArtists
+        .firstWhere((a) => a.name == artistName, orElse: () {
+      // Fallback to mock artist with no artwork
+      return ma.Artist(itemId: '', provider: '', name: artistName);
+    });
+    
+    final artUri = _autoArtUri(provider, artist);
+    
+    return [
+      // Option 1: Play Artist Radio
+      MediaItem(
+        id: 'action_radio_artist|$artistName',
+        title: '\ud83d\udcfb Start Radio',
+        artist: 'Play radio based on $artistName',
+        artUri: artUri,
+        playable: true,
+      ),
+      // Option 2: Shuffle Artist
+      MediaItem(
+        id: 'action_shuffle_artist|$artistName',
+        title: '\ud83d\udd00 Shuffle Artist',
+        artist: 'Play all tracks from $artistName in random order',
+        artUri: artUri,
+        playable: true,
+      ),
+      // Option 3: Play All
+      MediaItem(
+        id: 'action_play_artist|$artistName',
+        title: '\u25b6\ufe0f Play All',
+        artist: 'Play all tracks from $artistName',
+        artUri: artUri,
+        playable: true,
+      ),
+      // Option 4: Browse Albums (navigation)
+      MediaItem(
+        id: 'artist|$artistName',
+        title: '\ud83d\udcbf View Albums',
+        artist: 'Browse all albums by $artistName',
+        artUri: artUri,
+        playable: false,
+      ),
+    ];
+  }
+
+  /// Build actions menu for album (Play, Radio, Shuffle, View Tracks)
+  List<MediaItem> _autoBuildAlbumActions(
+      MusicAssistantProvider provider, String alProvider, String alItemId) {
+    _logger.log('AndroidAuto: Building album actions for $alProvider/$alItemId');
+    
+    // Find the album for metadata
+    final album = SyncService.instance.cachedAlbums.firstWhere(
+      (a) => a.provider == alProvider && a.itemId == alItemId,
+      orElse: () {
+        // Fallback to mock album
+        return ma.Album(itemId: alItemId, provider: alProvider, name: 'Album');
+      },
+    );
+    
+    final artUri = _autoArtUri(provider, album);
+    
+    return [
+      // Option 1: Play Album
+      MediaItem(
+        id: 'action_play_album|$alProvider|$alItemId',
+        title: '\u25b6\ufe0f Play Album',
+        artist: 'Play ${album.name}',
+        artUri: artUri,
+        playable: true,
+      ),
+      // Option 2: Radio based on Album
+      MediaItem(
+        id: 'action_radio_album|$alProvider|$alItemId',
+        title: '\ud83d\udcfb Start Radio',
+        artist: 'Play radio based on ${album.name}',
+        artUri: artUri,
+        playable: true,
+      ),
+      // Option 3: Shuffle Album
+      MediaItem(
+        id: 'action_shuffle_album|$alProvider|$alItemId',
+        title: '\ud83d\udd00 Shuffle Album',
+        artist: 'Shuffle ${album.name}',
+        artUri: artUri,
+        playable: true,
+      ),
+      // Option 4: View Tracks (navigation)
+      MediaItem(
+        id: 'album|$alProvider|$alItemId',
+        title: '\ud83c\udfb5 View Tracks',
+        artist: 'Browse all tracks in ${album.name}',
+        artUri: artUri,
+        playable: false,
+      ),
+    ];
+  }
+
   List<MediaItem> _autoBuildAlbumList(MusicAssistantProvider provider) {
     final albums = SyncService.instance.cachedAlbums;
     _logger.log('AndroidAuto: Albums: ${albums.length}');
-    return albums.map((a) => MediaItem(
-      id: 'album|${a.provider}|${a.itemId}',
-      title: a.name,
-      artist: a.artistsString,
-      artUri: _autoArtUri(provider, a),
-      playable: false,
-    )).toList();
+    
+    // Sort alphabetically
+    final sortedAlbums = List<ma.Album>.from(albums)
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    
+    final items = <MediaItem>[];
+    
+    // If more than max items, paginate
+    if (sortedAlbums.length > _maxItemsWithoutPagination) {
+      // Add first page with alphabetical separators
+      items.addAll(_buildItemsWithSeparators(
+        sortedAlbums.take(_pageSize).toList(),
+        provider,
+        (album) => MediaItem(
+          id: 'album_actions|${album.provider}|${album.itemId}',  // CHANGED: point to actions menu
+          title: album.name,
+          artist: album.artistsString,
+          artUri: _autoArtUriWithCache(provider, album),
+          playable: false,
+        ),
+        (album) => album.name,
+      ));
+      
+      // Add "Load More" button
+      items.add(MediaItem(
+        id: 'load_more|albums|1',
+        title: 'Load More (${sortedAlbums.length - _pageSize} remaining)',
+        playable: false,
+      ));
+    } else {
+      // Show all with separators if reasonable count
+      items.addAll(_buildItemsWithSeparators(
+        sortedAlbums,
+        provider,
+        (album) => MediaItem(
+          id: 'album_actions|${album.provider}|${album.itemId}',  // CHANGED: point to actions menu
+          title: album.name,
+          artist: album.artistsString,
+          artUri: _autoArtUriWithCache(provider, album),
+          playable: false,
+        ),
+        (album) => album.name,
+      ));
+    }
+    
+    return items;
   }
 
   Future<List<MediaItem>> _autoBuildAlbumTracks(
@@ -1077,6 +1504,240 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   Uri? _autoArtUri(MusicAssistantProvider provider, ma.MediaItem item) {
     final url = provider.getImageUrl(item, size: 256);
     return url != null ? Uri.tryParse(url) : null;
+  }
+
+  /// Get artwork URI with caching support
+  Uri? _autoArtUriWithCache(MusicAssistantProvider provider, ma.MediaItem item) {
+    // Try cache first
+    final cached = _artworkCache.getCached(item.provider, item.itemId);
+    if (cached != null) return cached;
+    
+    // Fallback to generating URL
+    return _autoArtUri(provider, item);
+  }
+
+  /// Build list with alphabetical separators
+  List<MediaItem> _buildItemsWithSeparators<T extends ma.MediaItem>(
+    List<T> items,
+    MusicAssistantProvider provider,
+    MediaItem Function(T) itemBuilder,
+    String Function(T) nameExtractor,
+  ) {
+    final result = <MediaItem>[];
+    String? lastLetter;
+    
+    for (final item in items) {
+      final name = nameExtractor(item);
+      if (name.isEmpty) continue;
+      
+      final firstChar = name[0].toUpperCase();
+      // Only add separator for letters/numbers
+      if (RegExp(r'[A-Z0-9]').hasMatch(firstChar) && firstChar != lastLetter) {
+        result.add(MediaItem(
+          id: 'separator|$firstChar',
+          title: '─── $firstChar ───',
+          playable: false,
+        ));
+        lastLetter = firstChar;
+      }
+      
+      result.add(itemBuilder(item));
+    }
+    
+    return result;
+  }
+
+  // --- Priority 4: Smart Playback Helper Functions ---
+
+  /// Play artist radio (similar tracks based on artist)
+  Future<void> _playArtistRadio(
+      MusicAssistantProvider provider, String playerId, String artistName) async {
+    _logger.log('AndroidAuto: Playing artist radio for "$artistName"');
+    
+    try {
+      // Find the artist
+      final artist = SyncService.instance.cachedArtists.firstWhere(
+        (a) => a.name == artistName,
+        orElse: () => throw Exception('Artist not found: $artistName'),
+      );
+      
+      // Ensure we have API connection
+      if (provider.api == null) await provider.checkAndReconnect();
+      if (provider.api == null) {
+        _logger.log('AndroidAuto: No API, cannot play artist radio');
+        return;
+      }
+      
+      // Use the API's playArtistRadio method
+      await provider.api!.playArtistRadio(playerId, artist);
+    } catch (e) {
+      _logger.log('AndroidAuto: Error playing artist radio: $e');
+    }
+  }
+
+  /// Shuffle all tracks from an artist
+  Future<void> _playArtistShuffle(
+      MusicAssistantProvider provider, String playerId, String artistName) async {
+    _logger.log('AndroidAuto: Shuffling artist "$artistName"');
+    
+    try {
+      // Get all albums from artist
+      final albums = await provider.getArtistAlbumsWithCache(artistName);
+      if (albums.isEmpty) {
+        _logger.log('AndroidAuto: No albums found for artist "$artistName"');
+        return;
+      }
+      
+      // Collect all tracks (limit to 10 albums to avoid timeout)
+      final allTracks = <ma.Track>[];
+      for (final album in albums.take(10)) {
+        final tracks = await provider.getAlbumTracksWithCache(
+          album.provider,
+          album.itemId,
+        );
+        allTracks.addAll(tracks);
+      }
+      
+      if (allTracks.isEmpty) {
+        _logger.log('AndroidAuto: No tracks found for artist "$artistName"');
+        return;
+      }
+      
+      // Shuffle the tracks
+      allTracks.shuffle();
+      
+      // Play with shuffle enabled
+      await provider.playTracks(playerId, allTracks);
+      await provider.toggleShuffle(playerId, true);
+      
+      _logger.log('AndroidAuto: Playing ${allTracks.length} shuffled tracks from "$artistName"');
+    } catch (e) {
+      _logger.log('AndroidAuto: Error shuffling artist: $e');
+    }
+  }
+
+  /// Play all tracks from an artist (chronological order by album year)
+  Future<void> _playArtistAll(
+      MusicAssistantProvider provider, String playerId, String artistName) async {
+    _logger.log('AndroidAuto: Playing all tracks from "$artistName"');
+    
+    try {
+      // Get all albums from artist
+      final albums = await provider.getArtistAlbumsWithCache(artistName);
+      if (albums.isEmpty) {
+        _logger.log('AndroidAuto: No albums found for artist "$artistName"');
+        return;
+      }
+      
+      // Sort by year (most recent first)
+      albums.sort((a, b) => (b.year ?? 0).compareTo(a.year ?? 0));
+      
+      // Collect all tracks
+      final allTracks = <ma.Track>[];
+      for (final album in albums) {
+        final tracks = await provider.getAlbumTracksWithCache(
+          album.provider,
+          album.itemId,
+        );
+        allTracks.addAll(tracks);
+      }
+      
+      if (allTracks.isEmpty) {
+        _logger.log('AndroidAuto: No tracks found for artist "$artistName"');
+        return;
+      }
+      
+      await provider.playTracks(playerId, allTracks);
+      
+      _logger.log('AndroidAuto: Playing ${allTracks.length} tracks from "$artistName"');
+    } catch (e) {
+      _logger.log('AndroidAuto: Error playing artist: $e');
+    }
+  }
+
+  /// Play radio based on an album (similar tracks)
+  Future<void> _playAlbumRadio(
+      MusicAssistantProvider provider, String playerId,
+      String alProvider, String alItemId) async {
+    _logger.log('AndroidAuto: Playing album radio for $alProvider/$alItemId');
+    
+    try {
+      final tracks = await provider.getAlbumTracksWithCache(alProvider, alItemId);
+      if (tracks.isEmpty) {
+        _logger.log('AndroidAuto: No tracks found in album');
+        return;
+      }
+      
+      // Start radio based on first track
+      await provider.playRadio(playerId, tracks.first);
+      
+      _logger.log('AndroidAuto: Started radio from album');
+    } catch (e) {
+      _logger.log('AndroidAuto: Error playing album radio: $e');
+    }
+  }
+
+  /// Shuffle album tracks
+  Future<void> _playAlbumShuffle(
+      MusicAssistantProvider provider, String playerId,
+      String alProvider, String alItemId) async {
+    _logger.log('AndroidAuto: Shuffling album $alProvider/$alItemId');
+    
+    try {
+      final tracks = await provider.getAlbumTracksWithCache(alProvider, alItemId);
+      if (tracks.isEmpty) {
+        _logger.log('AndroidAuto: No tracks found in album');
+        return;
+      }
+      
+      // Shuffle the tracks
+      final shuffled = List<ma.Track>.from(tracks)..shuffle();
+      
+      // Play with shuffle enabled
+      await provider.playTracks(playerId, shuffled);
+      await provider.toggleShuffle(playerId, true);
+      
+      _logger.log('AndroidAuto: Playing ${shuffled.length} shuffled tracks from album');
+    } catch (e) {
+      _logger.log('AndroidAuto: Error shuffling album: $e');
+    }
+  }
+
+  /// Shuffle playlist tracks
+  Future<void> _playPlaylistShuffle(
+      MusicAssistantProvider provider, String playerId,
+      String plProvider, String plItemId) async {
+    _logger.log('AndroidAuto: Shuffling playlist $plProvider/$plItemId');
+    
+    try {
+      final ctxKey = 'plist|$plProvider|$plItemId';
+      final tracks = _autoTrackCache[ctxKey];
+      
+      if (tracks == null || tracks.isEmpty) {
+        // Cache miss - fetch tracks
+        final fetchedTracks = await provider.getPlaylistTracksWithCache(plProvider, plItemId);
+        if (fetchedTracks.isEmpty) {
+          _logger.log('AndroidAuto: No tracks found in playlist');
+          return;
+        }
+        
+        // Shuffle and play
+        final shuffled = List<ma.Track>.from(fetchedTracks)..shuffle();
+        await provider.playTracks(playerId, shuffled);
+        await provider.toggleShuffle(playerId, true);
+        
+        _logger.log('AndroidAuto: Playing ${shuffled.length} shuffled tracks from playlist');
+      } else {
+        // Use cached tracks
+        final shuffled = List<ma.Track>.from(tracks)..shuffle();
+        await provider.playTracks(playerId, shuffled);
+        await provider.toggleShuffle(playerId, true);
+        
+        _logger.log('AndroidAuto: Playing ${shuffled.length} shuffled tracks from playlist (cached)');
+      }
+    } catch (e) {
+      _logger.log('AndroidAuto: Error shuffling playlist: $e');
+    }
   }
 
   // ---------------------------------------------------------------------------
