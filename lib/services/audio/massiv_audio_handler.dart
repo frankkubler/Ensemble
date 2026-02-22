@@ -436,16 +436,16 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   /// If the library cache is still empty at call time (e.g. first launch before
   /// sync completes), the method waits 10 seconds and retries once so that the
   /// warm-up actually has data to work with.
-  Future<void> _precacheArtwork(MusicAssistantProvider provider, {bool _isRetry = false}) async {
+  Future<void> _precacheArtwork(MusicAssistantProvider provider, {bool isRetry = false}) async {
     try {
       final albums = SyncService.instance.cachedAlbums.take(50).toList();
       final artists = SyncService.instance.cachedArtists.take(50).toList();
 
       // Library not loaded yet — retry once after 10 s (first launch only).
-      if (!_isRetry && albums.isEmpty && artists.isEmpty) {
+      if (!isRetry && albums.isEmpty && artists.isEmpty) {
         _logger.log('AndroidAuto: Library not ready, retrying artwork precache in 10s');
         await Future.delayed(const Duration(seconds: 10));
-        await _precacheArtwork(provider, _isRetry: true);
+        await _precacheArtwork(provider, isRetry: true);
         return;
       }
 
