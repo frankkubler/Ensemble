@@ -102,7 +102,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   // Android Auto: pagination constants
   static const int _pageSize = 50;
-  static const int _maxItemsWithoutPagination = 200;
+  static const int _maxItemsWithoutPagination = 500;  // Increased from 200 to show more items with alphabetical separators
 
   // Android Auto: artwork cache for faster loading
   static final _artworkCache = AndroidAutoArtworkCache();
@@ -1125,20 +1125,17 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     
     final items = <MediaItem>[];
     
-    // If more than max items, paginate
+    // If more than max items, paginate WITHOUT separators (to avoid confusion)
     if (sortedArtists.length > _maxItemsWithoutPagination) {
-      // Add first page with alphabetical separators
-      items.addAll(_buildItemsWithSeparators(
-        sortedArtists.take(_pageSize).toList(),
-        provider,
-        (artist) => MediaItem(
-          id: 'artist_actions|${artist.name}',  // CHANGED: point to actions menu
+      // Add first page WITHOUT alphabetical separators (clearer in pagination mode)
+      for (final artist in sortedArtists.take(_pageSize)) {
+        items.add(MediaItem(
+          id: 'artist_actions|${artist.name}',
           title: artist.name,
           artUri: _autoArtUriWithCache(provider, artist),
           playable: false,
-        ),
-        (artist) => artist.name,
-      ));
+        ));
+      }
       
       // Add "Load More" button
       items.add(MediaItem(
@@ -1293,21 +1290,18 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     
     final items = <MediaItem>[];
     
-    // If more than max items, paginate
+    // If more than max items, paginate WITHOUT separators (to avoid confusion)
     if (sortedAlbums.length > _maxItemsWithoutPagination) {
-      // Add first page with alphabetical separators
-      items.addAll(_buildItemsWithSeparators(
-        sortedAlbums.take(_pageSize).toList(),
-        provider,
-        (album) => MediaItem(
-          id: 'album_actions|${album.provider}|${album.itemId}',  // CHANGED: point to actions menu
+      // Add first page WITHOUT alphabetical separators (clearer in pagination mode)
+      for (final album in sortedAlbums.take(_pageSize)) {
+        items.add(MediaItem(
+          id: 'album_actions|${album.provider}|${album.itemId}',
           title: album.name,
           artist: album.artistsString,
           artUri: _autoArtUriWithCache(provider, album),
           playable: false,
-        ),
-        (album) => album.name,
-      ));
+        ));
+      }
       
       // Add "Load More" button
       items.add(MediaItem(
