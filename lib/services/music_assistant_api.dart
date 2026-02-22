@@ -211,7 +211,10 @@ class MusicAssistantAPI {
         onError: (error) {
           _logger.log('WebSocket error: $error');
           _updateConnectionState(MAConnectionState.error);
-          _reconnect();
+          // Only reconnect if not disposed
+          if (!_isDisposed) {
+            _reconnect();
+          }
         },
         onDone: () {
           _logger.log('WebSocket connection closed');
@@ -220,7 +223,10 @@ class MusicAssistantAPI {
           if (_connectionCompleter != null && !_connectionCompleter!.isCompleted) {
             _connectionCompleter!.completeError(Exception('Connection closed'));
           }
-          _reconnect();
+          // Only reconnect if not disposed
+          if (!_isDisposed) {
+            _reconnect();
+          }
         },
       );
 
@@ -3625,7 +3631,10 @@ class MusicAssistantAPI {
 
   void _updateConnectionState(MAConnectionState state) {
     _currentState = state;
-    _connectionStateController.add(state);
+    // Only add event if not disposed to prevent "Cannot add new events after calling close" error
+    if (!_isDisposed && !_connectionStateController.isClosed) {
+      _connectionStateController.add(state);
+    }
   }
 
   /// Start heartbeat timer to keep WebSocket connection alive
