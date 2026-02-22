@@ -256,6 +256,34 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     onSkipToPrevious?.call();
   }
 
+  @override
+  Future<void> onTaskRemoved() async {
+    // Called when Android Auto disconnects or app is swiped away from recents
+    _logger.log('AndroidAuto: onTaskRemoved - Android Auto disconnected');
+    
+    // Pause the builtin player if it's playing
+    if (_autoProvider != null) {
+      try {
+        final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+        final selectedPlayer = _autoProvider!.selectedPlayer;
+        
+        if (builtinPlayerId != null && 
+            selectedPlayer != null &&
+            selectedPlayer.playerId == builtinPlayerId &&
+            selectedPlayer.isPlaying) {
+          _logger.log('AndroidAuto: Auto-pausing builtin player on disconnect');
+          // Use the callback to pause via provider
+          onPause?.call();
+        }
+      } catch (e) {
+        _logger.log('AndroidAuto: Error pausing on disconnect: $e');
+      }
+    }
+    
+    // Call parent implementation to handle cleanup
+    await super.onTaskRemoved();
+  }
+
   // --- Custom methods for Ensemble ---
 
   /// Play a URL with the given metadata
