@@ -261,7 +261,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     // Called when Android Auto disconnects or app is swiped away from recents
     _logger.log('AndroidAuto: onTaskRemoved - Android Auto disconnected');
     
-    // Pause the builtin player if it's playing
+    // Pause the builtin (phone) player if it is playing.
+    // Call pausePlayer() directly — NOT the onPause toggle callback, which could
+    // accidentally resume if the player state is briefly ambiguous at disconnect.
     if (_autoProvider != null) {
       try {
         final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
@@ -272,8 +274,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             selectedPlayer.playerId == builtinPlayerId &&
             selectedPlayer.isPlaying) {
           _logger.log('AndroidAuto: Auto-pausing builtin player on disconnect');
-          // Use the callback to pause via provider
-          onPause?.call();
+          await _autoProvider!.pausePlayer(builtinPlayerId);
         }
       } catch (e) {
         _logger.log('AndroidAuto: Error pausing on disconnect: $e');
@@ -425,19 +426,30 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _autoProvider = provider;
     _logger.log('AndroidAuto: provider set');
     
-    // Precache artwork for frequently accessed categories
+    // Precache artwork for frequently accessed categories.
+    // If the library isn't loaded yet, _precacheArtwork will retry automatically.
     _precacheArtwork(provider);
   }
 
-  /// Precache artwork for top items to improve loading performance
-  Future<void> _precacheArtwork(MusicAssistantProvider provider) async {
+  /// Precache artwork for the top 50 albums and artists.
+  ///
+  /// If the library cache is still empty at call time (e.g. first launch before
+  /// sync completes), the method waits 10 seconds and retries once so that the
+  /// warm-up actually has data to work with.
+  Future<void> _precacheArtwork(MusicAssistantProvider provider, {bool _isRetry = false}) async {
     try {
-      // Precache albums (top 50)
       final albums = SyncService.instance.cachedAlbums.take(50).toList();
-      await _artworkCache.precacheCategory(provider, albums);
-      
-      // Precache artists (top 50)
       final artists = SyncService.instance.cachedArtists.take(50).toList();
+
+      // Library not loaded yet — retry once after 10 s (first launch only).
+      if (!_isRetry && albums.isEmpty && artists.isEmpty) {
+        _logger.log('AndroidAuto: Library not ready, retrying artwork precache in 10s');
+        await Future.delayed(const Duration(seconds: 10));
+        await _precacheArtwork(provider, _isRetry: true);
+        return;
+      }
+
+      await _artworkCache.precacheCategory(provider, albums);
       await _artworkCache.precacheCategory(provider, artists);
       
       _logger.log('AndroidAuto: Precached ${albums.length + artists.length} artworks');
@@ -1654,9 +1666,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       // Sort by year (most recent first)
       albums.sort((a, b) => (b.year ?? 0).compareTo(a.year ?? 0));
       
-      // Collect all tracks
+      // Collect all tracks — cap at 20 albums to avoid AA timeout
       final allTracks = <ma.Track>[];
-      for (final album in albums) {
+      for (final album in albums.take(20)) {
         final tracks = await provider.getAlbumTracksWithCache(
           album.provider,
           album.itemId,
