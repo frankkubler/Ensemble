@@ -100,7 +100,7 @@ class PositionTracker {
     Duration? duration,
     double? serverTimestamp,
   }) {
-    _logger.log('⏱️ PositionTracker.updateFromServer: pos=${position.toStringAsFixed(1)}s, isPlaying=$isPlaying, playerId=$playerId');
+    _logger.debug('⏱️ PositionTracker.updateFromServer: pos=${position.toStringAsFixed(1)}s, isPlaying=$isPlaying, playerId=$playerId');
     final bool playerChanged = _playerId != playerId;
     final bool playStateChanged = _isPlaying != isPlaying;
     final bool durationChanged = duration != null && _duration != duration;
@@ -179,11 +179,11 @@ class PositionTracker {
       final newAnchorPos = anchorIsGettingStale && !playerChanged && !playStateChanged && isPlaying
           ? currentInterpolated  // Keep our interpolated position, just refresh the anchor time
           : anchorPos;           // Use server position for other cases
-      _logger.log('⏱️ PositionTracker: Anchor updated ${_anchorPosition.toStringAsFixed(1)}s -> ${newAnchorPos.toStringAsFixed(1)}s (playerChanged=$playerChanged, playStateChanged=$playStateChanged, positionDiff=${positionDiff.toStringAsFixed(1)}, suspiciousReset=$isSuspiciousReset, anchorStale=$anchorIsGettingStale)');
+      _logger.debug('⏱️ PositionTracker: Anchor updated ${_anchorPosition.toStringAsFixed(1)}s -> ${newAnchorPos.toStringAsFixed(1)}s (playerChanged=$playerChanged, playStateChanged=$playStateChanged, positionDiff=${positionDiff.toStringAsFixed(1)}, suspiciousReset=$isSuspiciousReset, anchorStale=$anchorIsGettingStale)');
       _anchorPosition = newAnchorPos;
       _anchorTime = DateTime.now();
     } else if (positionDiff > 2) {
-      _logger.log('⏱️ PositionTracker: Anchor NOT updated (suspiciousReset=$isSuspiciousReset, staleTimestamp=$hasStaleTimestamp, interpolated=${currentInterpolated.toStringAsFixed(1)}s)');
+      _logger.debug('⏱️ PositionTracker: Anchor NOT updated (suspiciousReset=$isSuspiciousReset, staleTimestamp=$hasStaleTimestamp, interpolated=${currentInterpolated.toStringAsFixed(1)}s)');
     }
 
     _isPlaying = isPlaying;
@@ -227,7 +227,7 @@ class PositionTracker {
 
   /// Clear tracker state (e.g., when disconnecting)
   void clear() {
-    _logger.log('⏱️ PositionTracker.clear() called');
+    _logger.debug('⏱️ PositionTracker.clear() called');
     _stopInterpolationTimer();
     _playerId = null;
     _isPlaying = false;
@@ -238,17 +238,17 @@ class PositionTracker {
 
   void _startInterpolationTimer() {
     if (_interpolationTimer != null) {
-      _logger.log('⏱️ PositionTracker: Timer already running, skipping start');
+      _logger.debug('⏱️ PositionTracker: Timer already running, skipping start');
       return;
     }
 
-    _logger.log('⏱️ PositionTracker: Starting interpolation timer (anchor=${_anchorPosition.toStringAsFixed(1)}s)');
+    _logger.debug('⏱️ PositionTracker: Starting interpolation timer (anchor=${_anchorPosition.toStringAsFixed(1)}s)');
     _interpolationTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
       // Log every 4 ticks (1 second) if no emission happened
       if (timer.tick % 4 == 0) {
         final pos = currentPosition;
         if (pos.inSeconds == _lastEmittedSeconds) {
-          _logger.log('⏱️ PositionTracker: Timer tick ${timer.tick}, pos=${pos.inSeconds}s unchanged');
+          _logger.debug('⏱️ PositionTracker: Timer tick ${timer.tick}, pos=${pos.inSeconds}s unchanged');
         }
       }
       _emitPosition();
@@ -259,7 +259,7 @@ class PositionTracker {
   }
 
   void _stopInterpolationTimer() {
-    _logger.log('⏱️ PositionTracker: Stopping interpolation timer (was ${_interpolationTimer != null ? "running" : "null"})');
+    _logger.debug('⏱️ PositionTracker: Stopping interpolation timer (was ${_interpolationTimer != null ? "running" : "null"})');
     _interpolationTimer?.cancel();
     _interpolationTimer = null;
   }
@@ -271,7 +271,7 @@ class PositionTracker {
     // Only emit if second changed (reduces unnecessary updates)
     if (seconds != _lastEmittedSeconds) {
       _lastEmittedSeconds = seconds;
-      _logger.log('⏱️ PositionTracker: Emitting position ${seconds}s (anchor=${_anchorPosition.toStringAsFixed(1)}s, playing=$_isPlaying)');
+      _logger.debug('⏱️ PositionTracker: Emitting position ${seconds}s (anchor=${_anchorPosition.toStringAsFixed(1)}s, playing=$_isPlaying)');
       _positionController.add(pos);
     }
   }
