@@ -657,7 +657,7 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
     _logger.log('📊 Subscribing to positionStream for progress bar');
     _positionSubscription = maProvider.positionTracker.positionStream.listen((position) {
       if (!mounted) return;
-      _logger.log('📊 Progress received position: ${position.inSeconds}s');
+      _logger.debug('📊 Progress received position: ${position.inSeconds}s');
       _progressNotifier.value = position.inSeconds;
     });
   }

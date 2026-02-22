@@ -541,7 +541,7 @@ class SendspinService {
 
     try {
       final json = jsonEncode(message);
-      _logger.log('Sendspin: Sending message: ${message['type']}');
+      _logger.debug('Sendspin: Sending message: ${message['type']}');
       _channel!.sink.add(json);
     } catch (e) {
       _logger.log('Sendspin: Error sending message: $e');

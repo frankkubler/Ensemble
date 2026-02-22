@@ -3063,7 +3063,7 @@ class MusicAssistantProvider with ChangeNotifier {
             _cacheService.setCachedTrackForPlayer(playerId, mergedTrack);
             _logger.log('📋 Merged album info into existing track for $playerName: ${albumName}');
           } else {
-            _logger.log('📋 Skipped caching for $playerName - already have better data (artist: $existingHasProperArtist, image: $existingHasImage)');
+            _logger.debug('📋 Skipped caching for $playerName - already have better data (artist: $existingHasProperArtist, image: $existingHasImage)');
           }
 
           // For selected player, _updatePlayerState() is already called above which fetches queue data
@@ -4556,7 +4556,7 @@ class MusicAssistantProvider with ChangeNotifier {
         return;
       }
       // Sendspin PCM player - continue to start timer
-      _logger.log('🔔 Starting notification timer for Sendspin PCM player');
+      _logger.debug('🔔 Starting notification timer for Sendspin PCM player');
     }
 
     // Only run timer if player is playing
@@ -4800,7 +4800,7 @@ class MusicAssistantProvider with ChangeNotifier {
   /// Called when playback stops (player state becomes idle)
   void _startIdleServiceTimer() {
     _idleServiceTimer?.cancel();
-    _logger.log('⏱️ Starting idle service timer (${_idleServiceTimeout.inMinutes} min)');
+    _logger.debug('⏱️ Starting idle service timer (${_idleServiceTimeout.inMinutes} min)');
     _idleServiceTimer = Timer(_idleServiceTimeout, () {
       _logger.log('⏱️ Idle service timeout reached - stopping foreground service');
       audioHandler.stopService();
@@ -5730,7 +5730,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
         final itemJsonList = queue.items.map((item) => jsonEncode(item.toJson())).toList();
         await DatabaseService.instance.saveQueue(playerId, itemJsonList);
-        _logger.log('💾 Persisted ${queue.items.length} queue items to database');
+        _logger.debug('💾 Persisted ${queue.items.length} queue items to database');
       } catch (e) {
         _logger.log('⚠️ Error persisting queue to database: $e');
       }

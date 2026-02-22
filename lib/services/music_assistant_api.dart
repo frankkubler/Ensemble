@@ -251,7 +251,7 @@ class MusicAssistantAPI {
   void _handleMessage(dynamic message) {
     try {
       final data = jsonDecode(message as String) as Map<String, dynamic>;
-      _logger.log('Received message: ${data.keys}');
+      _logger.debug('Received message: ${data.keys}');
 
       // Check for server info message (first message on connect)
       if (data.containsKey('server_version')) {
@@ -1981,7 +1981,7 @@ class MusicAssistantAPI {
               currentIndex = queueResult['current_index'] as int?;
               shuffleEnabled = queueResult['shuffle_enabled'] as bool?;
               repeatMode = queueResult['repeat_mode'] as String?;
-              _logger.log('🔀 Queue metadata: shuffle_enabled=$shuffleEnabled, repeat_mode=$repeatMode');
+              _logger.debug('🔀 Queue metadata: shuffle_enabled=$shuffleEnabled, repeat_mode=$repeatMode');
 
               final currentItemData = queueResult['current_item'] as Map<String, dynamic>?;
               final currentItemName = currentItemData?['name'] as String?;
@@ -2017,7 +2017,7 @@ class MusicAssistantAPI {
           }
 
           if (items.isEmpty) {
-            _logger.log('⚠️ Queue is empty or all items failed to parse');
+            _logger.debug('⚠️ Queue is empty or all items failed to parse');
             return null;
           }
 
