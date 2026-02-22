@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show unawaited;
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart' as pcm;
+import 'package:audio_session/audio_session.dart';
 import 'debug_logger.dart';
 
 /// Callback type for elapsed time updates
@@ -153,6 +154,19 @@ class PcmAudioPlayer {
 
     try {
       _logger.log('PcmAudioPlayer: Initializing (${_format.sampleRate}Hz, ${_format.channels}ch, ${_format.bitDepth}bit)');
+
+      // CRITICAL: Configure AudioSession BEFORE initializing flutter_pcm_sound
+      // This ensures audio is properly routed to Android Auto, car Bluetooth, etc.
+      try {
+        final session = await AudioSession.instance;
+        if (!session.isConfigured) {
+          await session.configure(const AudioSessionConfiguration.music());
+          _logger.log('PcmAudioPlayer: AudioSession configured for music playback');
+        }
+      } catch (e) {
+        _logger.log('PcmAudioPlayer: AudioSession configuration warning (non-fatal): $e');
+        // Continue anyway - AudioSession might already be configured by AudioHandler
+      }
 
       // Setup flutter_pcm_sound with Sendspin audio format
       await pcm.FlutterPcmSound.setup(

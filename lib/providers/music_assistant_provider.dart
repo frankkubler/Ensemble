@@ -2092,13 +2092,7 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   /// Check if server version is >= 2.7.0b20 (uses Sendspin instead of builtin_player)
-  /// TEMPORARY: Disabled for Android Auto compatibility - always use just_audio mode
   bool _serverUsesSendspin() {
-    // Android Auto requires just_audio mode (builtin_player), not Sendspin/PCM
-    // Return false to force classic builtin_player even on newer MA servers
-    return false;
-    
-    /* Original logic - re-enable when Sendspin works with Android Auto
     final version = _parseServerVersion();
     if (version == null) return false;
 
@@ -2116,7 +2110,6 @@ class MusicAssistantProvider with ChangeNotifier {
     // patch == 0, so version is 2.7.0 - need beta >= 20
     if (beta == null) return true; // 2.7.0 release is newer than 2.7.0b20
     return beta >= 20;
-    */
   }
 
   /// Check if server has built-in Sendspin proxy (added in MA 2.7.1)
@@ -2426,18 +2419,14 @@ class MusicAssistantProvider with ChangeNotifier {
   /// Handle Sendspin pause command
   void _handleSendspinPause() async {
     _logger.log('⏸️ Sendspin: Pause command received');
-    // Pause both players - PCM for raw streaming, local for URL-based
     await _pcmAudioPlayer?.pause();
-    await _localPlayer.pause();
     _sendspinService?.reportState(playing: false, paused: true);
   }
 
   /// Handle Sendspin stop command
   void _handleSendspinStop() async {
     _logger.log('⏹️ Sendspin: Stop command received');
-    // Stop both players - PCM for raw streaming, local for URL-based
     await _pcmAudioPlayer?.stop();
-    await _localPlayer.stop();
     _sendspinService?.reportState(playing: false, paused: false);
   }
 
