@@ -175,6 +175,7 @@ For access outside your home network, you'll need to expose Music Assistant thro
 A huge thank you to my sponsors! 💖
 
 <a href="https://github.com/pcsokonay"><img src="https://github.com/pcsokonay.png" width="60px" alt="pcsokonay" /></a>
+<a href="https://github.com/githubchb"><img src="https://github.com/githubchb.png" width="60px" alt="githubchb" /></a>
 
 ## License
 
