@@ -585,6 +585,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   static const _autoIdAlbums = 'cat|albums';
   static const _autoIdFavorites = 'cat|favorites';
 
+  // Use an A-Z index for large lists to keep Android Auto browsing fast.
+  static const _autoAlphaIndexThreshold = 180;
+
   // Media ID constants — Favourite subcategories
   static const _autoIdFavArtists = 'cat|fav_artists';
   static const _autoIdFavAlbums = 'cat|fav_albums';
@@ -798,6 +801,21 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     if (parts.length < 2) return [];
 
     switch (parts[0]) {
+      case 'artists_alpha':
+        if (parts.length >= 2) {
+          return _autoBuildArtistList(provider, alphaFilter: parts[1]);
+        }
+      case 'albums_alpha':
+        if (parts.length >= 2) {
+          return _autoBuildAlbumList(provider, alphaFilter: parts[1]);
+        }
+      case 'tracks_alpha':
+        if (parts.length >= 3) {
+          final ctxKey = Uri.decodeComponent(parts[1]);
+          final alpha = parts[2];
+          final tracks = _autoTrackCache[ctxKey] ?? const <ma.Track>[];
+          return _autoBuildTrackItems(provider, tracks, ctxKey, alphaFilter: alpha);
+        }
       case 'playlist':
         if (parts.length >= 3) {
           return _autoBuildPlaylistTracks(provider, parts[1], parts[2]);
@@ -1488,9 +1506,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _logger.log('AndroidAuto: Fav tracks returned ${tracks.length} tracks');
     const ctxKey = 'favs||';
     _cacheTrackList(ctxKey, tracks);
-    final items = tracks.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
-    if (items.isNotEmpty) items.insert(0, _autoStartRadioItem(ctxKey));
-    return items;
+    return _autoBuildTrackItems(provider, tracks, ctxKey);
   }
 
   Future<List<MediaItem>> _autoBuildPlaylistList(MusicAssistantProvider provider) async {
@@ -1516,28 +1532,41 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         await provider.getPlaylistTracksWithCache(plProvider, plItemId);
     final ctxKey = 'plist|$plProvider|$plItemId';
     _cacheTrackList(ctxKey, tracks);
-    final items = tracks.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
-    if (items.isNotEmpty) items.insert(0, _autoStartRadioItem(ctxKey));
-    return items;
+    return _autoBuildTrackItems(provider, tracks, ctxKey);
   }
 
-  Future<List<MediaItem>> _autoBuildArtistList(MusicAssistantProvider provider) async {
+  Future<List<MediaItem>> _autoBuildArtistList(
+    MusicAssistantProvider provider, {
+    String? alphaFilter,
+  }) async {
     var artists = SyncService.instance.cachedArtists;
     if (artists.isEmpty) {
       _logger.log('AndroidAuto: cachedArtists empty, loading from cache');
       await SyncService.instance.loadFromCache();
       artists = SyncService.instance.cachedArtists;
     }
-    _logger.log('AndroidAuto: Artists: ${artists.length}');
-    return Future.wait(artists.map((a) async {
-      final imageUrl = await provider.getArtistImageUrlWithFallback(a, size: 256);
-      return MediaItem(
-        id: 'artist|${a.name}',
-        title: a.name,
-        artUri: imageUrl != null ? _contentUriForArtwork(imageUrl) : null,
-        playable: false,
+    artists.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    if (alphaFilter == null && artists.length > _autoAlphaIndexThreshold) {
+      _logger.log('AndroidAuto: Artists large list (${artists.length}), returning A-Z index');
+      return _autoBuildAlphaIndexItems(
+        items: artists.map((a) => a.name),
+        idPrefix: 'artists_alpha',
+        icon: _iconArtist,
       );
-    }));
+    }
+
+    final filtered = alphaFilter == null
+        ? artists
+        : artists.where((a) => _alphaKey(a.name) == alphaFilter).toList();
+
+    _logger.log('AndroidAuto: Artists: ${filtered.length}${alphaFilter != null ? ' (filter $alphaFilter)' : ''}');
+    return filtered.map((a) => MediaItem(
+      id: 'artist|${a.name}',
+      title: a.name,
+      artUri: _autoArtUri(provider, a),
+      playable: false,
+    )).toList();
   }
 
   Future<List<MediaItem>> _autoBuildArtistAlbums(
@@ -1565,15 +1594,33 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     ];
   }
 
-  Future<List<MediaItem>> _autoBuildAlbumList(MusicAssistantProvider provider) async {
+  Future<List<MediaItem>> _autoBuildAlbumList(
+    MusicAssistantProvider provider, {
+    String? alphaFilter,
+  }) async {
     var albums = SyncService.instance.cachedAlbums;
     if (albums.isEmpty) {
       _logger.log('AndroidAuto: cachedAlbums empty, loading from cache');
       await SyncService.instance.loadFromCache();
       albums = SyncService.instance.cachedAlbums;
     }
-    _logger.log('AndroidAuto: Albums: ${albums.length}');
-    return albums.map((a) => MediaItem(
+    albums.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    if (alphaFilter == null && albums.length > _autoAlphaIndexThreshold) {
+      _logger.log('AndroidAuto: Albums large list (${albums.length}), returning A-Z index');
+      return _autoBuildAlphaIndexItems(
+        items: albums.map((a) => a.name),
+        idPrefix: 'albums_alpha',
+        icon: _iconAlbum,
+      );
+    }
+
+    final filtered = alphaFilter == null
+        ? albums
+        : albums.where((a) => _alphaKey(a.name) == alphaFilter).toList();
+
+    _logger.log('AndroidAuto: Albums: ${filtered.length}${alphaFilter != null ? ' (filter $alphaFilter)' : ''}');
+    return filtered.map((a) => MediaItem(
       id: 'album|${a.provider}|${a.itemId}',
       title: a.name,
       artist: a.artistsString,
@@ -1589,9 +1636,82 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _logger.log('AndroidAuto: Album $alProvider/$alItemId tracks: ${tracks.length}');
     final ctxKey = 'album|$alProvider|$alItemId';
     _cacheTrackList(ctxKey, tracks);
-    final items = tracks.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
-    if (items.isNotEmpty) items.insert(0, _autoStartRadioItem(ctxKey));
+    return _autoBuildTrackItems(provider, tracks, ctxKey);
+  }
+
+  List<MediaItem> _autoBuildTrackItems(
+    MusicAssistantProvider provider,
+    List<ma.Track> tracks,
+    String ctxKey, {
+    String? alphaFilter,
+  }) {
+    final sorted = List<ma.Track>.from(tracks)
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    if (alphaFilter == null && sorted.length > _autoAlphaIndexThreshold) {
+      _logger.log('AndroidAuto: Tracks large list (${sorted.length}) for $ctxKey, returning A-Z index');
+      return _autoBuildAlphaIndexItems(
+        items: sorted.map((t) => t.name),
+        idPrefix: 'tracks_alpha|${Uri.encodeComponent(ctxKey)}',
+        icon: _iconMusic,
+      );
+    }
+
+    final filtered = alphaFilter == null
+        ? sorted
+        : sorted.where((t) => _alphaKey(t.name) == alphaFilter).toList();
+    final items = filtered.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
+    if (items.isNotEmpty) {
+      items.insert(0, _autoStartRadioItem(ctxKey));
+    }
     return items;
+  }
+
+  List<MediaItem> _autoBuildAlphaIndexItems({
+    required Iterable<String> items,
+    required String idPrefix,
+    required Uri icon,
+  }) {
+    final counts = <String, int>{};
+    for (final value in items) {
+      final key = _alphaKey(value);
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+
+    final keys = counts.keys.toList()
+      ..sort((a, b) {
+        if (a == '#') return 1;
+        if (b == '#') return -1;
+        return a.compareTo(b);
+      });
+
+    return keys.map((key) => MediaItem(
+      id: '$idPrefix|$key',
+      title: '$key (${counts[key]})',
+      artUri: icon,
+      playable: false,
+    )).toList();
+  }
+
+  String _alphaKey(String input) {
+    final trimmed = input.trimLeft();
+    if (trimmed.isEmpty) return '#';
+
+    var c = trimmed[0].toUpperCase();
+    const fold = {
+      'À': 'A', 'Á': 'A', 'Â': 'A', 'Ã': 'A', 'Ä': 'A', 'Å': 'A',
+      'Ç': 'C',
+      'È': 'E', 'É': 'E', 'Ê': 'E', 'Ë': 'E',
+      'Ì': 'I', 'Í': 'I', 'Î': 'I', 'Ï': 'I',
+      'Ñ': 'N',
+      'Ò': 'O', 'Ó': 'O', 'Ô': 'O', 'Õ': 'O', 'Ö': 'O',
+      'Ù': 'U', 'Ú': 'U', 'Û': 'U', 'Ü': 'U',
+      'Ý': 'Y',
+    };
+    c = fold[c] ?? c;
+
+    if (RegExp(r'^[A-Z]$').hasMatch(c)) return c;
+    return '#';
   }
 
   // --- Audiobook builders ---
