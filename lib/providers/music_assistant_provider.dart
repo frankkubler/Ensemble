@@ -6153,6 +6153,8 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> resumePlayer(String playerId) async {
+    // User explicitly asked to play — allow Sendspin stream/start again
+    _suppressSendspinAutoResume = false;
     try {
       // For resume, we let MA handle it since it needs to restart the stream
       // The stream_start event will trigger local playback
