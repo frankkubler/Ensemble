@@ -6054,6 +6054,8 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> playTracks(String playerId, List<Track> tracks, {int? startIndex, bool clearQueue = true}) async {
+    // User explicitly asked to play — allow Sendspin stream/start again
+    _suppressSendspinAutoResume = false;
     try {
       await _api?.playTracks(playerId, tracks, startIndex: startIndex, clearQueue: clearQueue);
 
@@ -6072,6 +6074,7 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> playRadio(String playerId, Track track) async {
+    _suppressSendspinAutoResume = false;
     try {
       await _api?.playRadio(playerId, track);
     } catch (e) {
@@ -6089,6 +6092,7 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> playArtistRadio(String playerId, Artist artist) async {
+    _suppressSendspinAutoResume = false;
     try {
       await _api?.playArtistRadio(playerId, artist);
     } catch (e) {
