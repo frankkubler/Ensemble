@@ -1063,7 +1063,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         await provider.checkAndReconnect();
 
         final allPlayers = await provider.getPlayers();
-        ma.Player? candidate;
+        Player? candidate;
 
         if (builtinPlayerId != null) {
           candidate = allPlayers
