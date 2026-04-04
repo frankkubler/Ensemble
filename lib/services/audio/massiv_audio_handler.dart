@@ -66,6 +66,29 @@ class AndroidAutoArtworkCache {
 /// Custom AudioHandler for Ensemble that provides full control over
 /// notification actions and metadata updates.
 class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
+  // Added pause on Bluetooth or generic audio service stop
+  @override
+  Future<void> onStop() async {
+    _logger.log('AudioHandler: onStop triggered – pausing builtin player (Bluetooth disconnect or system stop)');
+    final provider = _autoProvider;
+    if (provider != null) {
+      try {
+        final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+        if (builtinPlayerId != null) {
+          // Ensure we pause only if the builtin player is currently playing
+          final selected = provider.selectedPlayer;
+          if (selected != null && selected.playerId == builtinPlayerId && selected.isPlaying) {
+            await provider.pausePlayer(builtinPlayerId);
+            _logger.log('AudioHandler: Paused builtin player due to onStop');
+          }
+        }
+      } catch (e) {
+        _logger.log('AudioHandler: Error pausing builtin player onStop: $e');
+      }
+    }
+    // Call super to complete any default cleanup
+    await super.onStop();
+  }
   final AudioPlayer _player = AudioPlayer();
   final AuthManager authManager;
   final _logger = DebugLogger();
@@ -102,7 +125,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   // Android Auto: pagination constants
   static const int _pageSize = 50;
-  static const int _maxItemsWithoutPagination = 500;  // Increased from 200 to show more items with alphabetical separators
+  static const int _maxItemsWithoutPagination = 1000;  // Increased to allow larger libraries without pagination
 
   // Android Auto: artwork cache for faster loading
   static final _artworkCache = AndroidAutoArtworkCache();
@@ -396,7 +419,26 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   bool get isRemoteMode => _isRemoteMode;
 
-  // --- Expose player state for provider ---
+  /// Synchronise la file d’attente actuelle du téléphone avec Android Auto.
+  /// Cela assure que la même playlist est affichée dès le lancement.
+  Future<void> _syncCurrentQueue() async {
+    final provider = _autoProvider;
+    if (provider == null) return;
+    try {
+      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+      if (builtinPlayerId == null) return;
+      final queue = await provider.getQueue(builtinPlayerId);
+      if (queue != null && queue.items.isNotEmpty) {
+        const ctxKey = 'builtinQueue||';
+        _autoTrackCache[ctxKey] = queue.items.map((i) => i.track).toList();
+        _logger.log('AndroidAuto: Cached ${queue.items.length} queue items for sync');
+      }
+    } catch (e) {
+      _logger.log('AndroidAuto: Error syncing queue – $e');
+    }
+  }
+
+
 
   bool get isPlaying => _player.playing;
 
@@ -429,6 +471,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     // Precache artwork for frequently accessed categories.
     // If the library isn't loaded yet, _precacheArtwork will retry automatically.
     _precacheArtwork(provider);
+    // Synchronise la file d’attente du lecteur intégré avec Android Auto
+    _syncCurrentQueue();
   }
 
   /// Precache artwork for the top 50 albums and artists.
@@ -438,8 +482,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   /// warm-up actually has data to work with.
   Future<void> _precacheArtwork(MusicAssistantProvider provider, {bool isRetry = false}) async {
     try {
-      final albums = SyncService.instance.cachedAlbums.take(50).toList();
-      final artists = SyncService.instance.cachedArtists.take(50).toList();
+      final albums = SyncService.instance.cachedAlbums.take(100).toList();
+      final artists = SyncService.instance.cachedArtists.take(100).toList();
 
       // Library not loaded yet — retry once after 10 s (first launch only).
       if (!isRetry && albums.isEmpty && artists.isEmpty) {
