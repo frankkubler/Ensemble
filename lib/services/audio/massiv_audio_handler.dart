@@ -12,6 +12,7 @@ import '../settings_service.dart';
 import '../sync_service.dart';
 import '../../providers/music_assistant_provider.dart';
 import '../../models/media_item.dart' as ma;
+import '../../models/player.dart';
 
 /// Custom AudioHandler for Ensemble that provides full control over
 /// notification actions and metadata updates.

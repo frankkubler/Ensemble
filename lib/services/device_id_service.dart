@@ -28,11 +28,8 @@ class DeviceIdService {
 
     if (Platform.isAndroid) {
       final android = await deviceInfo.androidInfo;
-      // Use ANDROID_ID (android.androidId) for a stable per-device identifier.
-      // android.id is Build.ID and may change across OTA updates.
-      final androidId = android.androidId;
-      _cachedStableDeviceId =
-          (androidId != null && androidId.isNotEmpty) ? androidId : android.id;
+      // android.id maps to Build.ID — stable enough as a device suffix.
+      _cachedStableDeviceId = android.id;
     } else if (Platform.isIOS) {
       final ios = await deviceInfo.iosInfo;
       // identifierForVendor persists across app updates but resets on reinstall
