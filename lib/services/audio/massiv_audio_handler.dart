@@ -855,9 +855,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       _refreshPlaybackState();
     }
 
-    final playerId = await SettingsService.getBuiltinPlayerId();
+    final playerId = await _resolveReadyPlayerId(provider);
     if (playerId == null) {
-      _logger.log('AndroidAuto: no builtin player ID — cannot play');
+      _logger.log('AndroidAuto: no ready player queue — cannot play');
       return;
     }
 
@@ -1026,6 +1026,56 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     }
   }
 
+  /// Resolve a player that is actually ready to accept queue commands.
+  ///
+  /// On app resume, Android Auto may request playback before the builtin
+  /// player registration/queue is fully available on the server. We poll for
+  /// a short window and only return when queue access succeeds.
+  Future<String?> _resolveReadyPlayerId(
+    MusicAssistantProvider provider, {
+    Duration timeout = const Duration(seconds: 6),
+  }) async {
+    final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+    final deadline = DateTime.now().add(timeout);
+    var delayMs = 250;
+
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        await provider.checkAndReconnect();
+
+        final allPlayers = await provider.getPlayers();
+        ma.Player? candidate;
+
+        if (builtinPlayerId != null) {
+          candidate = allPlayers
+              .where((p) => p.playerId == builtinPlayerId && p.available)
+              .firstOrNull;
+        }
+
+        candidate ??= allPlayers
+            .where((p) => p.playerId == provider.selectedPlayer?.playerId && p.available)
+            .firstOrNull;
+
+        if (candidate != null) {
+          if (provider.selectedPlayer?.playerId != candidate.playerId) {
+            _logger.log('AndroidAuto: switching to ready player "${candidate.name}"');
+            provider.selectPlayer(candidate);
+          }
+
+          await provider.getQueue(candidate.playerId);
+          return candidate.playerId;
+        }
+      } catch (e) {
+        _logger.log('AndroidAuto: waiting for ready queue: $e');
+      }
+
+      await Future.delayed(Duration(milliseconds: delayMs));
+      delayMs = (delayMs * 2).clamp(250, 1500);
+    }
+
+    return null;
+  }
+
   // Search race condition guard
   int _searchId = 0;
 
@@ -1115,9 +1165,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     final provider = _autoProvider;
     if (provider == null || query.trim().isEmpty) return;
 
-    final playerId = await SettingsService.getBuiltinPlayerId();
+    final playerId = await _resolveReadyPlayerId(provider);
     if (playerId == null) {
-      _logger.log('AndroidAuto: playFromSearch: no builtin player');
+      _logger.log('AndroidAuto: playFromSearch: no ready player queue');
       return;
     }
 
