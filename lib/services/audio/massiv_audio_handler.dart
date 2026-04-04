@@ -66,10 +66,11 @@ class AndroidAutoArtworkCache {
 /// Custom AudioHandler for Ensemble that provides full control over
 /// notification actions and metadata updates.
 class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
-  // Added pause on Bluetooth or generic audio service stop
+  // Handle stop request (Bluetooth disconnect or system stop)
+  // In audio_service, we override stop() directly, not onStop()
   @override
-  Future<void> onStop() async {
-    _logger.log('AudioHandler: onStop triggered – pausing builtin player (Bluetooth disconnect or system stop)');
+  Future<void> stop() async {
+    _logger.log('AudioHandler: stop() triggered – pausing builtin player (Bluetooth disconnect or system stop)');
     final provider = _autoProvider;
     if (provider != null) {
       try {
@@ -79,15 +80,15 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           final selected = provider.selectedPlayer;
           if (selected != null && selected.playerId == builtinPlayerId && selected.isPlaying) {
             await provider.pausePlayer(builtinPlayerId);
-            _logger.log('AudioHandler: Paused builtin player due to onStop');
+            _logger.log('AudioHandler: Paused builtin player due to stop');
           }
         }
       } catch (e) {
-        _logger.log('AudioHandler: Error pausing builtin player onStop: $e');
+        _logger.log('AudioHandler: Error pausing builtin player on stop: $e');
       }
     }
-    // Call super to complete any default cleanup
-    await super.onStop();
+    // Stop the local audio player
+    await _player.stop();
   }
   final AudioPlayer _player = AudioPlayer();
   final AuthManager authManager;
