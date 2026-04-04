@@ -142,6 +142,13 @@ class MusicAssistantProvider with ChangeNotifier {
   // firing until the user explicitly triggers playback again.
   bool _suppressSendspinAutoResume = false;
 
+  // Android Auto session state
+  // True when AA connected event fired but builtin player was not yet in
+  // _availablePlayers — resolved in _loadAndSelectPlayers().
+  bool _pendingAASwitch = false;
+  // Player that was active before AA connected (to pause it on switch).
+  String? _preAASelectedPlayerId;
+
   // PCM audio player for raw Sendspin audio streaming
   PcmAudioPlayer? _pcmAudioPlayer;
 
@@ -2162,22 +2169,48 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onAAConnected = () async {
       _suppressSendspinAutoResume = false;
-      final playerId = await SettingsService.getBuiltinPlayerId();
-      if (playerId != null && _selectedPlayer?.playerId != playerId) {
+      _pendingAASwitch = false;
+      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+      if (builtinPlayerId == null) return;
+
+      // Pause the previously active non-builtin player (e.g. Sonos, Chromecast)
+      // so it doesn't keep playing while Android Auto takes over.
+      final previous = _selectedPlayer;
+      if (previous != null &&
+          previous.playerId != builtinPlayerId &&
+          previous.state == 'playing') {
+        _preAASelectedPlayerId = previous.playerId;
+        _logger.log('🎵 AA connected: pausing previous player "${previous.name}" before switch');
+        unawaited(pausePlayer(previous.playerId));
+      }
+
+      if (_selectedPlayer?.playerId != builtinPlayerId) {
         final builtinPlayer = _availablePlayers
-            .where((p) => p.playerId == playerId)
+            .where((p) => p.playerId == builtinPlayerId)
             .firstOrNull;
         if (builtinPlayer != null) {
           _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
           selectPlayer(builtinPlayer);
+          // Proactively restore queue so the play button works immediately
+          unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+        } else {
+          // Players list not yet populated — mark as pending, resolved in _loadAndSelectPlayers
+          _logger.log('⚠️ AA connected but builtin player not in list yet — pending switch');
+          _pendingAASwitch = true;
         }
+      } else {
+        // Already on builtin player, still restore queue in case server lost it
+        unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
       }
     };
     audioHandler.onAADisconnected = () async {
       _suppressSendspinAutoResume = true;
+      _pendingAASwitch = false;
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId != null) {
-        _logger.log('🎵 AA disconnected: pausing builtin player, suppressing auto-resume');
+        _logger.log('🎵 AA disconnected: snapshotting state then pausing builtin player');
+        // Snapshot queue + position BEFORE pausing so they survive server-side queue clear
+        await _snapshotPlayerStateBeforePause(builtinPlayerId);
         pausePlayer(builtinPlayerId);
       }
     };
@@ -4558,6 +4591,24 @@ class MusicAssistantProvider with ChangeNotifier {
           // otherwise leave unselected until Sendspin registration completes
           _logger.log('⏳ No player selected — awaiting builtin player registration');
         }
+
+        // If AA connected before the player list was ready, resolve the pending
+        // switch now that _availablePlayers is fully populated.
+        if (_pendingAASwitch) {
+          final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+          if (builtinPlayerId != null) {
+            final builtin = _availablePlayers.cast<Player?>().firstWhere(
+              (p) => p!.playerId == builtinPlayerId,
+              orElse: () => null,
+            );
+            if (builtin != null) {
+              _logger.log('✅ Pending AA switch resolved: selecting "${builtin.name}"');
+              _pendingAASwitch = false;
+              selectPlayer(builtin);
+              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+            }
+          }
+        }
       }
 
       // Preload track data and images in background for swipe gestures
@@ -6183,8 +6234,12 @@ class MusicAssistantProvider with ChangeNotifier {
     }
   }
 
-  /// Attempt to restore the queue from cached data and start playback
-  Future<bool> _restoreQueueFromCache(String playerId) async {
+  /// Attempt to restore the queue from cached data and start playback.
+  ///
+  /// When [startPlayback] is false the queue is re-queued on the server but
+  /// the player is NOT started — used by the proactive AA-reconnect path so
+  /// the play button works without audio starting unexpectedly.
+  Future<bool> _restoreQueueFromCache(String playerId, {bool startPlayback = true}) async {
     try {
       final cachedQueue = await getCachedQueue(playerId);
       if (cachedQueue == null || cachedQueue.items.isEmpty) {
@@ -6211,15 +6266,107 @@ class MusicAssistantProvider with ChangeNotifier {
         return false;
       }
 
-      _logger.log('🔄 Restoring ${tracks.length} tracks from cached queue');
+      _logger.log('🔄 Restoring ${tracks.length} tracks from cached queue (startPlayback=$startPlayback)');
 
-      // Re-queue all tracks and start playback
-      await playTracks(playerId, tracks, startIndex: 0);
+      if (startPlayback) {
+        // Re-queue all tracks and start playback immediately
+        await playTracks(playerId, tracks, startIndex: 0);
+      } else {
+        // Re-queue without starting — play button will trigger playback later.
+        // playTracks then immediately pause so the server has the queue ready.
+        await playTracks(playerId, tracks, startIndex: 0);
+        // Brief wait for the server to register the queue before pausing
+        await Future.delayed(const Duration(milliseconds: 300));
+        await pausePlayer(playerId);
+      }
 
       return true;
     } catch (e) {
       _logger.log('❌ Error restoring queue from cache: $e');
       return false;
+    }
+  }
+
+  /// Snapshot queue and position for the builtin player BEFORE pausing on AA disconnect.
+  ///
+  /// Ensures that even if the server clears the queue after pause, we have a
+  /// local copy to restore on the next AA reconnect.
+  Future<void> _snapshotPlayerStateBeforePause(String playerId) async {
+    try {
+      // Force a fresh queue fetch so _persistQueueToDatabase is called now
+      final queue = await getQueue(playerId);
+      if (queue != null && queue.items.isNotEmpty) {
+        _logger.log('📸 AA disconnect snapshot: ${queue.items.length} tracks persisted');
+      }
+
+      // Save current playback position
+      final positionSeconds = _positionTracker.currentPosition.inSeconds;
+      if (positionSeconds > 5) {
+        await SettingsService.setAALastPosition(playerId, positionSeconds);
+        _logger.log('📸 AA disconnect snapshot: position=${positionSeconds}s saved');
+      }
+
+      // Save current track URI for cross-check on restore
+      final trackUri = _currentTrack?.uri ?? _currentTrack?.itemId;
+      await SettingsService.setAALastTrackUri(trackUri);
+    } catch (e) {
+      _logger.log('⚠️ _snapshotPlayerStateBeforePause failed (non-fatal): $e');
+    }
+  }
+
+  /// Proactively ensure the builtin player has a queue after AA connects.
+  ///
+  /// If the server still has a valid queue nothing changes. If the queue is
+  /// gone (server restart, cold boot) we restore from cache WITHOUT starting
+  /// playback so the play button works immediately in Android Auto.
+  Future<void> _proactivelyRestoreQueueAfterAAReconnect(String playerId) async {
+    try {
+      // Small delay to let the server finish its own AA handshake
+      await Future.delayed(const Duration(seconds: 2));
+
+      final serverQueue = await getQueue(playerId);
+      if (serverQueue != null && serverQueue.items.isNotEmpty) {
+        _logger.log('✅ AA reconnect: server queue intact (${serverQueue.items.length} tracks)');
+        // Restore saved position so seeking back works as expected
+        await _restorePositionAfterAAReconnect(playerId);
+        return;
+      }
+
+      // Server queue empty — restore from cache without starting playback
+      _logger.log('⚠️ AA reconnect: server queue empty — restoring from cache (no auto-play)');
+      final restored = await _restoreQueueFromCache(playerId, startPlayback: false);
+      if (restored) {
+        _logger.log('✅ AA reconnect: queue pre-loaded, play button ready');
+      } else {
+        _logger.log('❌ AA reconnect: no cached queue available');
+      }
+    } catch (e) {
+      _logger.log('⚠️ _proactivelyRestoreQueueAfterAAReconnect failed (non-fatal): $e');
+    }
+  }
+
+  /// Restore the playback position that was saved at AA disconnect.
+  ///
+  /// Only seeks if the currently queued track matches the one that was playing
+  /// when we disconnected (same URI) and the position is meaningful (> 5s).
+  Future<void> _restorePositionAfterAAReconnect(String playerId) async {
+    try {
+      final savedPositionSeconds = await SettingsService.getAALastPosition(playerId);
+      if (savedPositionSeconds == null || savedPositionSeconds <= 5) return;
+
+      final savedTrackUri = await SettingsService.getAALastTrackUri();
+      final currentUri = _currentTrack?.uri ?? _currentTrack?.itemId;
+      if (savedTrackUri != null && currentUri != null && savedTrackUri != currentUri) {
+        _logger.log('⏩ AA reconnect: track changed, skipping position restore');
+        return;
+      }
+
+      _logger.log('⏩ AA reconnect: restoring position to ${savedPositionSeconds}s');
+      await seek(playerId, savedPositionSeconds);
+      // Clear saved position after restore so it doesn't apply to subsequent sessions
+      await SettingsService.setAALastPosition(playerId, 0);
+    } catch (e) {
+      _logger.log('⚠️ _restorePositionAfterAAReconnect failed (non-fatal): $e');
     }
   }
 

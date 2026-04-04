@@ -90,6 +90,8 @@ class SettingsService {
   static const String _keyLocalPlayerName = 'local_player_name';
   static const String _keyOwnerName = 'owner_name';
   static const String _keyLastSelectedPlayerId = 'last_selected_player_id';
+  static const String _keyAALastPositionPrefix = 'aa_last_position_'; // + playerId
+  static const String _keyAALastTrackUri = 'aa_last_track_uri'; // last track before AA disconnect
   static const String _keySmartSortPlayers = 'smart_sort_players';
   static const String _keyShowRecentAlbums = 'show_recent_albums';
   static const String _keyShowDiscoverArtists = 'show_discover_artists';
@@ -347,6 +349,23 @@ class SettingsService {
   static Future<String?> getLastSelectedPlayerId() => _getString(_keyLastSelectedPlayerId);
   static Future<void> setLastSelectedPlayerId(String? playerId) =>
       _setString(_keyLastSelectedPlayerId, playerId, removeIfEmpty: true);
+
+  // Last position before Android Auto disconnection — restored on AA reconnect
+  static Future<int?> getAALastPosition(String playerId) async {
+    final prefs = await _getPrefs();
+    final value = prefs.getInt('$_keyAALastPositionPrefix$playerId');
+    return value;
+  }
+
+  static Future<void> setAALastPosition(String playerId, int positionSeconds) async {
+    final prefs = await _getPrefs();
+    await prefs.setInt('$_keyAALastPositionPrefix$playerId', positionSeconds);
+  }
+
+  // Last track URI before Android Auto disconnection
+  static Future<String?> getAALastTrackUri() => _getString(_keyAALastTrackUri);
+  static Future<void> setAALastTrackUri(String? uri) =>
+      _setString(_keyAALastTrackUri, uri, removeIfEmpty: true);
 
   // Smart Sort Players - sort by status (playing > on > off) instead of alphabetically
   static Future<bool> getSmartSortPlayers() => _getBool(_keySmartSortPlayers, defaultValue: false);
