@@ -2083,6 +2083,21 @@ class MusicAssistantProvider with ChangeNotifier {
           await _updatePlayerState();
           // Note: _preloadAdjacentPlayers is already called in refreshPlayers() -> _loadAndSelectPlayers()
           _logger.log('🔄 Connection verified, players and state refreshed');
+
+          // Verify Sendspin PCM streaming is still alive.
+          // After app resume the API WebSocket may be up but Sendspin dead,
+          // leading to "playing" notification with no actual audio output.
+          if (!_sendspinConnected ||
+              _sendspinService == null ||
+              _sendspinService!.state != SendspinConnectionState.connected) {
+            _logger.log('🔄 Sendspin not connected, re-establishing PCM streaming...');
+            final reconnected = await _connectViaSendspin();
+            if (reconnected) {
+              _logger.log('🔄 Sendspin reconnection successful');
+            } else {
+              _logger.log('⚠️ Sendspin reconnection failed — audio may not play');
+            }
+          }
         } catch (e) {
           _logger.log('🔄 Connection verification failed, reconnecting: $e');
           try {
@@ -2601,6 +2616,7 @@ class MusicAssistantProvider with ChangeNotifier {
         await _pcmAudioPlayer!.connectToStream(_sendspinService!.audioDataStream);
       } else {
         _logger.log('⚠️ Sendspin: Failed to initialize PCM player');
+        _sendspinConnected = false;
         return;
       }
     }

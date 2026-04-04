@@ -1082,6 +1082,15 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           }
 
           await provider.getQueue(candidate.playerId);
+
+          // Ensure Sendspin PCM streaming is alive before handing back
+          // the player — without it the notification shows "playing"
+          // but no audio reaches the speakers.
+          if (!provider.isSendspinConnected) {
+            _logger.log('AndroidAuto: Sendspin not connected, waiting...');
+            throw Exception('Sendspin PCM not ready');
+          }
+
           return candidate.playerId;
         }
       } catch (e) {
