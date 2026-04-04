@@ -135,6 +135,13 @@ class MusicAssistantProvider with ChangeNotifier {
   SendspinService? _sendspinService;
   bool _sendspinConnected = false;
 
+  // Suppress Sendspin auto-resume after Android Auto disconnects.
+  // When AA disconnects we pause the player, but Sendspin may reconnect
+  // later (e.g. phone switches to home WiFi) and the server could send
+  // a stream/start — this flag prevents _pcmAudioPlayer.play() from
+  // firing until the user explicitly triggers playback again.
+  bool _suppressSendspinAutoResume = false;
+
   // PCM audio player for raw Sendspin audio streaming
   PcmAudioPlayer? _pcmAudioPlayer;
 
@@ -2154,6 +2161,7 @@ class MusicAssistantProvider with ChangeNotifier {
       _cancelIdleServiceTimer();
     };
     audioHandler.onAAConnected = () async {
+      _suppressSendspinAutoResume = false;
       final playerId = await SettingsService.getBuiltinPlayerId();
       if (playerId != null && _selectedPlayer?.playerId != playerId) {
         final builtinPlayer = _availablePlayers
@@ -2166,9 +2174,10 @@ class MusicAssistantProvider with ChangeNotifier {
       }
     };
     audioHandler.onAADisconnected = () async {
+      _suppressSendspinAutoResume = true;
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId != null) {
-        _logger.log('🎵 AA disconnected: pausing builtin player');
+        _logger.log('🎵 AA disconnected: pausing builtin player, suppressing auto-resume');
         pausePlayer(builtinPlayerId);
       }
     };
@@ -2503,6 +2512,11 @@ class MusicAssistantProvider with ChangeNotifier {
 
   /// Handle Sendspin play command
   void _handleSendspinPlay(String streamUrl, Map<String, dynamic> trackInfo) async {
+    if (_suppressSendspinAutoResume) {
+      _logger.log('🎵 Sendspin: Ignoring play command (auto-resume suppressed after AA disconnect)');
+      _sendspinService?.reportState(playing: false, paused: true);
+      return;
+    }
     _logger.log('🎵 Sendspin: Play command received');
 
     try {
@@ -2599,6 +2613,16 @@ class MusicAssistantProvider with ChangeNotifier {
   /// 2. Start the foreground service to prevent background throttling
   /// 3. Reset position for new track and start position timer
   void _handleSendspinStreamStart(Map<String, dynamic>? trackInfo) async {
+    // Suppress auto-resume after AA disconnect: the phone may reconnect
+    // to the MA server on home WiFi and the server sends stream/start for
+    // the still-queued track. Without this guard, audio blasts on the phone
+    // speaker when the user has already left the car.
+    if (_suppressSendspinAutoResume) {
+      _logger.log('🎵 Sendspin: Ignoring stream/start (auto-resume suppressed after AA disconnect)');
+      // Tell the server to stop sending audio for this player
+      _sendspinService?.reportState(playing: false, paused: true);
+      return;
+    }
     final aaDisc = audioHandler.aaDisconnectedAt;
     if (aaDisc != null && DateTime.now().difference(aaDisc).inSeconds < 2) {
       _logger.log('🎵 Sendspin: Ignoring stream/start (AA disconnected ${DateTime.now().difference(aaDisc).inMilliseconds}ms ago)');
