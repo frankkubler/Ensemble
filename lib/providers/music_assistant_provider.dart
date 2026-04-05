@@ -146,6 +146,11 @@ class MusicAssistantProvider with ChangeNotifier {
   // True when AA connected event fired but builtin player was not yet in
   // _availablePlayers — resolved in _loadAndSelectPlayers().
   bool _pendingAASwitch = false;
+  // True for the entire duration of an AA session (set on connect, cleared on disconnect).
+  // Forces _loadAndSelectPlayers to always select the builtin/phone player regardless
+  // of what was last selected — prevents SOUNDBAR_BT from being re-selected on
+  // each checkAndReconnect loop during an active AA session.
+  bool _aaSessionActive = false;
   // Player that was active before AA connected (to pause it on switch).
   String? _preAASelectedPlayerId;
 
@@ -2183,6 +2188,7 @@ class MusicAssistantProvider with ChangeNotifier {
     audioHandler.onAAConnected = () async {
       _suppressSendspinAutoResume = false;
       _pendingAASwitch = false;
+      _aaSessionActive = true;
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId == null) return;
 
@@ -2202,20 +2208,11 @@ class MusicAssistantProvider with ChangeNotifier {
             .firstOrNull;
         if (builtinPlayer != null) {
           _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
-          // If selectPlayer is currently blocked by the reentrancy guard (e.g. because
-          // _loadAndSelectPlayers just ran and is selecting SOUNDBAR_BT), retry until
-          // the guard releases — up to 1s with 50ms polling.
+          // If selectPlayer is currently blocked by the reentrancy guard, mark as pending.
+          // _loadAndSelectPlayers will resolve it via _aaSessionActive on its next call.
           if (_selectPlayerInProgress) {
-            _logger.log('⏳ AA switch: selectPlayer in progress, waiting for guard to release...');
-            unawaited(() async {
-              for (int i = 0; i < 20; i++) {
-                await Future.delayed(const Duration(milliseconds: 50));
-                if (!_selectPlayerInProgress) break;
-              }
-              _logger.log('🎵 AA switch: retrying selectPlayer for "${builtinPlayer.name}"');
-              selectPlayer(builtinPlayer);
-              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayer.playerId));
-            }());
+            _logger.log('⏳ AA switch: selectPlayer in progress, marking _pendingAASwitch for next _loadAndSelectPlayers');
+            _pendingAASwitch = true;
           } else {
             selectPlayer(builtinPlayer);
             // Proactively restore queue so the play button works immediately
@@ -2226,24 +2223,6 @@ class MusicAssistantProvider with ChangeNotifier {
           final availableIds = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
           _logger.log('⚠️ AA connected but builtin ($builtinPlayerId) not in list yet — available: [$availableIds]');
           _pendingAASwitch = true;
-          // Delayed retry: try again after 3s in case player list wasn't ready
-          Future.delayed(const Duration(seconds: 3), () async {
-            if (!_pendingAASwitch) return; // already resolved
-            final freshPlayers = await getPlayers();
-            final retryPlayer = freshPlayers.cast<Player?>().firstWhere(
-              (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId),
-              orElse: () => null,
-            );
-            if (retryPlayer != null) {
-              _logger.log('✅ AA switch retry resolved: selecting "${retryPlayer.name}"');
-              _pendingAASwitch = false;
-              selectPlayer(retryPlayer);
-              unawaited(_proactivelyRestoreQueueAfterAAReconnect(retryPlayer.playerId));
-            } else {
-              final retryIds = freshPlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
-              _logger.log('❌ AA switch retry failed — still not found in: [$retryIds]');
-            }
-          });
         }
       } else {
         // Already on builtin player, still restore queue in case server lost it
@@ -2253,6 +2232,7 @@ class MusicAssistantProvider with ChangeNotifier {
     audioHandler.onAADisconnected = () async {
       _suppressSendspinAutoResume = true;
       _pendingAASwitch = false;
+      _aaSessionActive = false;
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId != null) {
         _logger.log('🎵 AA disconnected: snapshotting state then pausing builtin player');
@@ -4559,6 +4539,34 @@ class MusicAssistantProvider with ChangeNotifier {
         final lastSelectedPlayerId = await SettingsService.getLastSelectedPlayerId();
 
         _logger.log('⚙️ Current selection: ${_selectedPlayer?.name ?? 'none'}, lastSelected=$lastSelectedPlayerId, coldStart=$coldStart');
+
+        // PRIORITY 0: Android Auto session active — always select the phone/builtin player.
+        // This overrides any other selection logic to ensure that repeated calls to
+        // _loadAndSelectPlayers during an AA session never re-select SOUNDBAR_BT.
+        if (_aaSessionActive && builtinPlayerId != null) {
+          final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
+            (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId),
+            orElse: () => null,
+          );
+          if (builtinPlayer != null) {
+            if (_selectedPlayer?.playerId != builtinPlayer.playerId) {
+              _logger.log('🚗 AA session active: forcing selection to builtin player "${builtinPlayer.name}"');
+              playerToSelect = builtinPlayer;
+            } else {
+              _logger.log('🚗 AA session active: already on builtin player "${builtinPlayer.name}"');
+            }
+            _pendingAASwitch = false;
+          } else {
+            _logger.log('🚗 AA session active: builtin player $builtinPlayerId not yet in list, marking pending');
+            _pendingAASwitch = true;
+          }
+          if (playerToSelect != null) {
+            selectPlayer(playerToSelect);
+            unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+          }
+          unawaited(_preloadAdjacentPlayers(preloadAll: true));
+          return;
+        }
 
         // SIMPLIFIED PLAYER SELECTION LOGIC:
         // 1. User's manual selection is always respected
