@@ -4541,13 +4541,17 @@ class MusicAssistantProvider with ChangeNotifier {
         }
 
         // Priority 1: Restore last selected player (on coldStart)
+        // Require powered=true so a player that was manually switched off is
+        // not silently re-selected on reconnect.
         if (playerToSelect == null && coldStart && lastSelectedPlayerId != null) {
           playerToSelect = _availablePlayers.cast<Player?>().firstWhere(
-            (p) => p!.playerId == lastSelectedPlayerId && p.available,
+            (p) => p!.playerId == lastSelectedPlayerId && p.available && p.powered,
             orElse: () => null,
           );
           if (playerToSelect != null) {
             _logger.log('🔄 Restored last selected player: ${playerToSelect.name}');
+          } else {
+            _logger.log('⚠️ Last selected player ($lastSelectedPlayerId) unavailable or powered off — falling back');
           }
         }
 
