@@ -2173,15 +2173,13 @@ class MusicAssistantProvider with ChangeNotifier {
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId == null) return;
 
-      // Pause the previously active non-builtin player (e.g. Sonos, Chromecast)
-      // so it doesn't keep playing while Android Auto takes over.
+      // Remember the previously active player (e.g. SOUNDBAR_BT / ESP32)
+      // but do NOT pause it — the soundbar is an independent device and should
+      // keep playing at home while AA takes over on the phone.
       final previous = _selectedPlayer;
-      if (previous != null &&
-          previous.playerId != builtinPlayerId &&
-          previous.state == 'playing') {
+      if (previous != null && previous.playerId != builtinPlayerId) {
         _preAASelectedPlayerId = previous.playerId;
-        _logger.log('🎵 AA connected: pausing previous player "${previous.name}" before switch');
-        unawaited(pausePlayer(previous.playerId));
+        _logger.log('🎵 AA connected: keeping "${previous.name}" playing, switching app to phone');
       }
 
       if (_selectedPlayer?.playerId != builtinPlayerId) {

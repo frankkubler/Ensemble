@@ -716,17 +716,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         }
       }
       _refreshPlaybackState();
-      // Auto-select builtin player so playback goes to the phone
-      final playerId = await SettingsService.getBuiltinPlayerId();
-      if (playerId != null && provider.selectedPlayer?.playerId != playerId) {
-        final builtinPlayer = provider.availablePlayersUnfiltered
-            .where((p) => p.playerId == playerId)
-            .firstOrNull;
-        if (builtinPlayer != null) {
-          _logger.log('AndroidAuto: auto-selecting builtin player "${builtinPlayer.name}"');
-          provider.selectPlayer(builtinPlayer);
-        }
-      }
+      // Delegate player switching + queue restoration to onAAConnected
+      // (same path as the native onAndroidAutoConnected event)
+      onAAConnected?.call();
     }
 
     try {
@@ -872,6 +864,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       _isAndroidAutoConnected = true;
       _aaChannel.invokeMethod('notifyAAConnected', null);
       _refreshPlaybackState();
+      // Delegate player switching + queue restoration to onAAConnected
+      onAAConnected?.call();
     }
 
     final playerId = await _resolveReadyPlayerId(provider);
