@@ -2193,8 +2193,27 @@ class MusicAssistantProvider with ChangeNotifier {
           unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
         } else {
           // Players list not yet populated — mark as pending, resolved in _loadAndSelectPlayers
-          _logger.log('⚠️ AA connected but builtin player not in list yet — pending switch');
+          final availableIds = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
+          _logger.log('⚠️ AA connected but builtin ($builtinPlayerId) not in list yet — available: [$availableIds]');
           _pendingAASwitch = true;
+          // Delayed retry: try again after 3s in case player list wasn't ready
+          Future.delayed(const Duration(seconds: 3), () async {
+            if (!_pendingAASwitch) return; // already resolved
+            final freshPlayers = await getPlayers();
+            final retryPlayer = freshPlayers.cast<Player?>().firstWhere(
+              (p) => p!.playerId == builtinPlayerId,
+              orElse: () => null,
+            );
+            if (retryPlayer != null) {
+              _logger.log('✅ AA switch retry resolved: selecting "${retryPlayer.name}"');
+              _pendingAASwitch = false;
+              selectPlayer(retryPlayer);
+              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+            } else {
+              final retryIds = freshPlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
+              _logger.log('❌ AA switch retry failed — still not found in: [$retryIds]');
+            }
+          });
         }
       } else {
         // Already on builtin player, still restore queue in case server lost it
@@ -4608,7 +4627,12 @@ class MusicAssistantProvider with ChangeNotifier {
               _pendingAASwitch = false;
               selectPlayer(builtin);
               unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+            } else {
+              final ids = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
+              _logger.log('⚠️ Pending AA switch: builtin $builtinPlayerId still not in [$ids]');
             }
+          } else {
+            _logger.log('⚠️ Pending AA switch: getBuiltinPlayerId() returned null');
           }
         }
       }

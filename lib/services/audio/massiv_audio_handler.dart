@@ -1049,6 +1049,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     Duration timeout = const Duration(seconds: 6),
   }) async {
     final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+    _logger.log('AndroidAuto: _resolveReadyPlayerId — builtinId=$builtinPlayerId, selected=${provider.selectedPlayer?.playerId}');
     final deadline = DateTime.now().add(timeout);
     var delayMs = 250;
 
@@ -1063,6 +1064,10 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           candidate = allPlayers
               .where((p) => p.playerId == builtinPlayerId && p.available)
               .firstOrNull;
+          if (candidate == null) {
+            final ids = allPlayers.map((p) => '${p.name}(${p.playerId},avail=${p.available})').join(', ');
+            _logger.log('AndroidAuto: builtin $builtinPlayerId not found in [$ids] — falling back to selected');
+          }
         }
 
         candidate ??= allPlayers
