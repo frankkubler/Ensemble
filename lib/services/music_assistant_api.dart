@@ -68,6 +68,14 @@ class MusicAssistantAPI {
 
   MusicAssistantAPI(this.serverUrl, this.authManager);
 
+  /// Check if a URL string has an explicit port (e.g., ":80", ":8095").
+  /// Dart's Uri.hasPort returns false for default ports (80/443) even when
+  /// explicitly specified, so we check the raw string instead.
+  bool _hasExplicitPort(String url) {
+    final withoutScheme = url.replaceFirst(RegExp(r'^https?://'), '');
+    return RegExp(r'^[^/:]+:\d+').hasMatch(withoutScheme);
+  }
+
   // Guard to prevent multiple simultaneous connection attempts
   Completer<void>? _connectionInProgress;
   bool _isDisposed = false;
@@ -145,7 +153,7 @@ class MusicAssistantAPI {
           queryParameters: {'client_id': clientId},
         );
         _logger.log('Using custom WebSocket port from settings: $_cachedCustomPort');
-      } else if (uri.hasPort) {
+      } else if (_hasExplicitPort(serverUrl)) {
         // Port is already specified in URL, keep it
         finalUri = Uri(
           scheme: uri.scheme,
@@ -251,7 +259,6 @@ class MusicAssistantAPI {
   void _handleMessage(dynamic message) {
     try {
       final data = jsonDecode(message as String) as Map<String, dynamic>;
-      _logger.debug('Received message: ${data.keys}');
 
       // Check for server info message (first message on connect)
       if (data.containsKey('server_version')) {
@@ -305,8 +312,23 @@ class MusicAssistantAPI {
       if (eventType != null) {
         // Get the object_id (player_id for player events)
         final objectId = data['object_id'] as String?;
-        final eventData = data['data'] as Map<String, dynamic>? ?? {};
 
+        // data['data'] can be Map, String, double, or null depending on event type:
+        //   player_updated  → Map (player object)
+        //   queue_updated   → Map (queue object)
+        //   queue_time_updated → double (elapsed playback time)
+        //   queue_items_updated → String (queue_id)
+        // Use 'is' check instead of 'as' cast to avoid TypeError on non-Map payloads.
+        final rawData = data['data'];
+        final Map<String, dynamic> eventData;
+        if (rawData is Map<String, dynamic>) {
+          eventData = rawData;
+        } else if (rawData != null) {
+          // Preserve scalar/non-Map values under 'value' so subscribers can read them.
+          eventData = {'value': rawData};
+        } else {
+          eventData = {};
+        }
 
         // Include object_id in event data so listeners can filter by player
         final enrichedData = {
@@ -1981,7 +2003,6 @@ class MusicAssistantAPI {
               currentIndex = queueResult['current_index'] as int?;
               shuffleEnabled = queueResult['shuffle_enabled'] as bool?;
               repeatMode = queueResult['repeat_mode'] as String?;
-              _logger.debug('🔀 Queue metadata: shuffle_enabled=$shuffleEnabled, repeat_mode=$repeatMode');
 
               final currentItemData = queueResult['current_item'] as Map<String, dynamic>?;
               final currentItemName = currentItemData?['name'] as String?;
@@ -2484,7 +2505,7 @@ class MusicAssistantAPI {
           port: _cachedCustomPort,
           path: '/flow/$playerId/$streamId.$extension',
         );
-      } else if (uri.hasPort) {
+      } else if (_hasExplicitPort(serverUrl)) {
         // Use port from URL
         finalUri = Uri(
           scheme: uri.scheme,
@@ -3196,7 +3217,7 @@ class MusicAssistantAPI {
     if (_cachedCustomPort != null) {
       // Use cached custom port from settings
       baseUrl = '${uriObj.scheme}://${uriObj.host}:$_cachedCustomPort';
-    } else if (!uriObj.hasPort) {
+    } else if (!_hasExplicitPort(serverUrl)) {
       if (useSecure) {
         // For HTTPS, don't add port 443 (it's the default)
         baseUrl = '${uriObj.scheme}://${uriObj.host}';
@@ -3303,7 +3324,7 @@ class MusicAssistantAPI {
     if (_cachedCustomPort != null) {
       // Use cached custom port from settings
       baseUrl = '${uri.scheme}://${uri.host}:$_cachedCustomPort';
-    } else if (!uri.hasPort) {
+    } else if (!_hasExplicitPort(serverUrl)) {
       if (useSecure) {
         // For HTTPS, don't add port 443 (it's the default)
         baseUrl = '${uri.scheme}://${uri.host}';

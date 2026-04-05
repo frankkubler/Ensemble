@@ -28,8 +28,7 @@ class DeviceIdService {
 
     if (Platform.isAndroid) {
       final android = await deviceInfo.androidInfo;
-      // ANDROID_ID is unique per device+user combo, persists across storage wipes
-      // Only resets on factory reset
+      // android.id maps to Build.ID — stable enough as a device suffix.
       _cachedStableDeviceId = android.id;
     } else if (Platform.isIOS) {
       final ios = await deviceInfo.iosInfo;

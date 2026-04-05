@@ -130,10 +130,8 @@ class SearchScreenState extends State<SearchScreen> {
   // Advanced search scorer with fuzzy matching, stopword removal, etc.
   final SearchScorer _searchScorer = SearchScorer();
 
-  // Scroll-to-hide search bar (vertical scroll only)
-  bool _isSearchBarVisible = true;
-  double _lastVerticalScrollOffset = 0;
-  static const double _scrollThreshold = 10.0;
+  // Scroll-to-hide search bar (0.0 = hidden, 1.0 = visible)
+  final ValueNotifier<double> _searchBarVisibility = ValueNotifier<double>(1.0);
 
   // Filter chip position tracking for animated sliding highlight
   final Map<String, GlobalKey> _filterKeys = {};
@@ -314,10 +312,7 @@ class SearchScreenState extends State<SearchScreen> {
 
   void requestFocus() {
     if (mounted) {
-      setState(() {
-        _isSearchBarVisible = true;
-        _lastVerticalScrollOffset = 0;
-      });
+      _searchBarVisibility.value = 1.0;
       _focusNode.requestFocus();
     }
   }
@@ -336,6 +331,7 @@ class SearchScreenState extends State<SearchScreen> {
     _pageController.dispose();
     _filterScrollController.dispose();
     _activeFilterNotifier.dispose();
+    _searchBarVisibility.dispose();
     super.dispose();
   }
 
@@ -347,17 +343,12 @@ class SearchScreenState extends State<SearchScreen> {
     }
 
     if (notification is ScrollUpdateNotification) {
-      final currentOffset = notification.metrics.pixels;
-      final delta = currentOffset - _lastVerticalScrollOffset;
-
-      if (delta.abs() > _scrollThreshold) {
-        final shouldShow = delta < 0 || currentOffset <= 0;
-        if (shouldShow != _isSearchBarVisible) {
-          setState(() {
-            _isSearchBarVisible = shouldShow;
-          });
-        }
-        _lastVerticalScrollOffset = currentOffset;
+      final delta = notification.scrollDelta ?? 0.0;
+      const maxHeight = kToolbarHeight + 16;
+      if (notification.metrics.pixels <= 0) {
+        _searchBarVisibility.value = 1.0;
+      } else {
+        _searchBarVisibility.value = (_searchBarVisibility.value - delta / maxHeight).clamp(0.0, 1.0);
       }
     }
     return false;
@@ -534,16 +525,23 @@ class SearchScreenState extends State<SearchScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Animated search bar - hides on scroll down
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOutCubic,
-              height: _isSearchBarVisible ? kToolbarHeight + 16 : 0,
-              clipBehavior: Clip.hardEdge,
-              decoration: const BoxDecoration(),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: Row(
+            // Search bar - slides away with scroll
+            ValueListenableBuilder<double>(
+              valueListenable: _searchBarVisibility,
+              builder: (context, visibility, child) {
+                return ClipRect(
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    heightFactor: visibility,
+                    child: child!,
+                  ),
+                );
+              },
+              child: SizedBox(
+                height: kToolbarHeight + 16,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                  child: Row(
                   children: [
                     // Search field container
                     Expanded(
@@ -646,6 +644,7 @@ class SearchScreenState extends State<SearchScreen> {
                     ),
                   ],
                 ),
+              ),
               ),
             ),
             // Main content

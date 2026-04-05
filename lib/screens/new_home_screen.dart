@@ -430,29 +430,28 @@ class _NewHomeScreenState extends State<NewHomeScreen> with AutomaticKeepAliveCl
                       ),
                     ),
                   ),
-                // Bottom fade gradient to mask content behind mini player
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  height: BottomSpacing.miniPlayerHeight + 22.0,
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            colorScheme.background.withOpacity(0.0),
-                            colorScheme.background.withOpacity(0.25),
-                            colorScheme.background.withOpacity(0.85),
-                          ],
-                          stops: const [0.0, 0.5, 1.0],
+                // Bottom fade gradient to mask content behind mini player (4+ rows only)
+                if (_countEnabledRows() >= 4)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: BottomSpacing.miniPlayerHeight,
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              colorScheme.background.withOpacity(0.0),
+                              colorScheme.background.withOpacity(0.85),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
               ],
             );
           },
@@ -503,9 +502,8 @@ class _NewHomeScreenState extends State<NewHomeScreen> with AutomaticKeepAliveCl
       builder: (context, constraints) {
         // Each row is always 1/3 of screen height
         // 1 row = 1/3, 2 rows = 2/3, 3 rows = full screen, 4+ rows scroll
-        // With extendBody: true, constraints include the area behind the nav bar.
-        // Subtract mini player overlay space (mini player + its margins sit above the nav bar).
-        final miniPlayerSpace = BottomSpacing.miniPlayerHeight + 22.0; // 84 + 22 = 106
+        // Reserve space for the mini player overlay at the bottom.
+        final miniPlayerSpace = BottomSpacing.miniPlayerHeight + 22.0;
         final availableHeight = constraints.maxHeight - miniPlayerSpace;
 
         // Account for margins between rows (2px each, 2 margins for 3 rows).

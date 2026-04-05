@@ -159,10 +159,8 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
   // PERF: Separate ValueNotifier for efficient UI updates (RestorableInt doesn't implement ValueListenable)
   final ValueNotifier<int> _tabIndexNotifier = ValueNotifier<int>(0);
 
-  // Scroll-to-hide filter bars
-  bool _isFilterBarVisible = true;
-  double _lastScrollOffset = 0;
-  static const double _scrollThreshold = 10.0;
+  // Scroll-to-hide filter bars (0.0 = hidden, 1.0 = visible)
+  final ValueNotifier<double> _filterBarVisibility = ValueNotifier<double>(1.0);
   bool _isLetterScrollbarDragging = false; // Disable scroll-to-hide while dragging
 
   // Options menu overlay - stored to close on navigation
@@ -859,17 +857,11 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
     }
 
     if (notification is ScrollUpdateNotification) {
-      final currentOffset = notification.metrics.pixels;
-      final delta = currentOffset - _lastScrollOffset;
-
-      if (delta.abs() > _scrollThreshold) {
-        final shouldShow = delta < 0 || currentOffset <= 0;
-        if (shouldShow != _isFilterBarVisible) {
-          setState(() {
-            _isFilterBarVisible = shouldShow;
-          });
-        }
-        _lastScrollOffset = currentOffset;
+      final delta = notification.scrollDelta ?? 0.0;
+      if (notification.metrics.pixels <= 0) {
+        _filterBarVisibility.value = 1.0;
+      } else {
+        _filterBarVisibility.value = (_filterBarVisibility.value - delta / _filterRowHeight).clamp(0.0, 1.0);
       }
     }
     return false;
@@ -911,13 +903,11 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
   }
 
   void _onLetterScrollbarDragChanged(bool isDragging) {
-    setState(() {
-      _isLetterScrollbarDragging = isDragging;
-      // Show the filter bar when starting to drag
-      if (isDragging) {
-        _isFilterBarVisible = true;
-      }
-    });
+    _isLetterScrollbarDragging = isDragging;
+    // Show the filter bar when starting to drag
+    if (isDragging) {
+      _filterBarVisibility.value = 1.0;
+    }
   }
 
   void _animateToCategory(int index) {
@@ -942,6 +932,7 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
     _pageController.dispose();
     _selectedTabIndex.dispose();
     _tabIndexNotifier.dispose();
+    _filterBarVisibility.dispose();
     _artistsScrollController.dispose();
     _albumsScrollController.dispose();
     _playlistsScrollController.dispose();
@@ -1449,7 +1440,12 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
             child: Column(
               children: [
                 // Two-row filter: Row 1 = Media types (hides on scroll), Row 2 = Sub-categories (always visible)
-                _buildFilterRows(colorScheme, l10n, showLibraryTypeRow: _isFilterBarVisible),
+                ValueListenableBuilder<double>(
+                  valueListenable: _filterBarVisibility,
+                  builder: (context, visibility, _) {
+                    return _buildFilterRows(colorScheme, l10n, barVisibility: visibility);
+                  },
+                ),
                 // Connecting banner when showing cached data
                 // Hide when we have cached players - UI is functional during background reconnect
                 if (!isConnected && syncService.hasCache && !context.read<MusicAssistantProvider>().hasCachedPlayers)
@@ -1546,23 +1542,25 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
   // Consistent height for filter rows
   static const double _filterRowHeight = 36.0;
 
-  Widget _buildFilterRows(ColorScheme colorScheme, S l10n, {required bool showLibraryTypeRow}) {
+  Widget _buildFilterRows(ColorScheme colorScheme, S l10n, {required double barVisibility}) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         // Row 1: Media type chips (hides when scrolling)
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic,
-          height: showLibraryTypeRow ? _filterRowHeight : 0,
-          clipBehavior: Clip.hardEdge,
-          decoration: const BoxDecoration(),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: _buildMediaTypeChips(colorScheme, l10n),
+        ClipRect(
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            heightFactor: barVisibility,
+            child: SizedBox(
+              height: _filterRowHeight,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: _buildMediaTypeChips(colorScheme, l10n),
+              ),
+            ),
           ),
         ),
-        if (showLibraryTypeRow) const SizedBox(height: 12), // Space between rows
+        SizedBox(height: 12 * barVisibility), // Space between rows
         // Row 2: Sub-category chips (left) + action buttons (right) - always visible
         SizedBox(
           height: _filterRowHeight,
@@ -4914,7 +4912,7 @@ class _NewLibraryScreenState extends State<NewLibraryScreen>
 
           try {
             // Start radio from this track
-            await maProvider.api?.playRadio(player.playerId, track);
+            await maProvider.playRadio(player.playerId, track);
           } catch (e) {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(

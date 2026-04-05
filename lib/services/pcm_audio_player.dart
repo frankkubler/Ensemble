@@ -69,6 +69,7 @@ class PcmAudioPlayer {
   bool _isFeeding = false;
   bool _isStarted = false;
   bool _isAutoRecovering = false;  // Tracks auto-recovery from setup errors
+  bool _userPaused = false;  // True when pause is user-initiated (not transitional)
   Completer<void>? _feedCompleter;  // Tracks when current feed operation completes
 
   // Error callback for operation failures
@@ -235,7 +236,9 @@ class PcmAudioPlayer {
     if (_shouldBlockFeeding) {
       // If we're paused and audio is arriving, this is likely a new stream
       // starting before the stream/start message. Queue for auto-recovery.
-      if (_state == PcmPlayerState.paused && !_isAutoRecovering) {
+      // BUT: don't auto-recover if the user explicitly paused — the arriving
+      // audio is just the tail end of the previous stream.
+      if (_state == PcmPlayerState.paused && !_isAutoRecovering && !_userPaused) {
         _logger.log('PcmAudioPlayer: Audio arriving while paused - initiating auto-recovery');
         _isAutoRecovering = true;
         _addToBuffer(audioData);
@@ -492,6 +495,7 @@ class PcmAudioPlayer {
 
     if (_state == PcmPlayerState.paused) {
       // Resume from pause - need to re-initialize since we released on pause
+      _userPaused = false;
       _logger.log('PcmAudioPlayer: Resuming from pause at ${elapsedTime.inSeconds}s');
       _state = PcmPlayerState.resuming;
 
@@ -547,6 +551,7 @@ class PcmAudioPlayer {
     }
 
     _logger.log('PcmAudioPlayer: Pause requested');
+    _userPaused = true;
 
     // Set pausing state FIRST to stop feed loop from starting new feeds
     _state = PcmPlayerState.pausing;

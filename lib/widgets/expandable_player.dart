@@ -81,6 +81,7 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   ColorScheme? _lightColorScheme;
   ColorScheme? _darkColorScheme;
   String? _lastImageUrl;
+  int _colorExtractionId = 0;
 
   // Queue state
   PlayerQueue? _queue;
@@ -672,7 +673,9 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
     // This keeps queue UI in sync when MA adds/removes items (e.g., radio mode)
     _queueItemsSubscription = api.queueItemsUpdatedEvents.listen((event) {
       if (!mounted) return;
-      final playerId = event['queue_id'] as String?;
+      // object_id from the MA event is mapped to 'player_id' in enrichedData.
+      // For queue_items_updated the object_id IS the queue_id (queue_id == player_id in MA).
+      final playerId = event['player_id'] as String?;
       final selectedPlayer = maProvider.selectedPlayer;
       // Only refresh if the event is for our current player
       if (playerId != null && selectedPlayer != null && playerId == selectedPlayer.playerId) {
@@ -757,13 +760,17 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   Future<void> _extractColors(String imageUrl) async {
     if (_lastImageUrl == imageUrl) return;
     _lastImageUrl = imageUrl;
+    final extractionId = ++_colorExtractionId;
 
     try {
       final colorSchemes = await PaletteHelper.extractColorSchemes(
         CachedNetworkImageProvider(imageUrl),
       );
 
-      if (colorSchemes != null && mounted) {
+      if (!mounted) return;
+      if (extractionId != _colorExtractionId) return;
+
+      if (colorSchemes != null) {
         setState(() {
           _lightColorScheme = colorSchemes.$1;
           _darkColorScheme = colorSchemes.$2;
@@ -2056,7 +2063,7 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
         : colorScheme.primaryContainer;
     // Create a darker shade for the "unplayed" portion of progress bar
     final collapsedBgUnplayed = Color.lerp(collapsedBg, Colors.black, 0.3)!;
-    final expandedBg = adaptiveScheme?.surface ?? const Color(0xFF121212);
+    final expandedBg = adaptiveScheme?.surface ?? colorScheme.surface;
     final expandedPrimary = adaptiveScheme?.primary;
     // Always update to current value - don't preserve stale adaptive colors
     _currentExpandedBgColor = expandedBg;

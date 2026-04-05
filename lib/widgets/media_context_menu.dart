@@ -403,7 +403,7 @@ class _MediaContextMenuOverlayState extends State<_MediaContextMenuOverlay>
       switch (widget.mediaType) {
         case ContextMenuMediaType.artist:
           final artist = widget.item as Artist;
-          await maProvider.api?.playArtistRadio(player.playerId, artist);
+          await maProvider.playArtistRadio(player.playerId, artist);
           break;
         case ContextMenuMediaType.track:
           final track = widget.item as Track;
@@ -437,7 +437,7 @@ class _MediaContextMenuOverlayState extends State<_MediaContextMenuOverlay>
           switch (widget.mediaType) {
             case ContextMenuMediaType.artist:
               final artist = widget.item as Artist;
-              await maProvider.api?.playArtistRadio(player.playerId, artist);
+              await maProvider.playArtistRadio(player.playerId, artist);
               break;
             case ContextMenuMediaType.track:
               final track = widget.item as Track;

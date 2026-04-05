@@ -70,6 +70,9 @@ void main() {
           androidNotificationIcon: 'drawable/ic_notification',
           androidShowNotificationBadge: false,
           androidStopForegroundOnPause: false,  // Keep service alive when paused for background playback
+          androidBrowsableRootExtras: {
+            'android.media.browse.SEARCH_SUPPORTED': true,
+          },
         ),
       );
       _logger.log('🎵 AudioService initialized - background playback and media notifications ENABLED');

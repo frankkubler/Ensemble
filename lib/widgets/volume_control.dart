@@ -238,6 +238,7 @@ class _VolumeControlState extends State<VolumeControl> {
                   children: [
                     // The slider with gesture detection for precision mode
                     GestureDetector(
+                      behavior: HitTestBehavior.opaque,
                       onHorizontalDragStart: (details) {
                         setState(() {
                           _isDragging = true;

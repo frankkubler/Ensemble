@@ -321,8 +321,6 @@ class SendspinService {
       final data = jsonDecode(message) as Map<String, dynamic>;
       final type = data['type'] as String?;
 
-      _logger.log('Sendspin: Received message type: $type');
-
       switch (type) {
         case 'server/hello':
           // Server acknowledged our client/hello - we're registered!
