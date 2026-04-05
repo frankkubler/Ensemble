@@ -2202,9 +2202,25 @@ class MusicAssistantProvider with ChangeNotifier {
             .firstOrNull;
         if (builtinPlayer != null) {
           _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
-          selectPlayer(builtinPlayer);
-          // Proactively restore queue so the play button works immediately
-          unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+          // If selectPlayer is currently blocked by the reentrancy guard (e.g. because
+          // _loadAndSelectPlayers just ran and is selecting SOUNDBAR_BT), retry until
+          // the guard releases — up to 1s with 50ms polling.
+          if (_selectPlayerInProgress) {
+            _logger.log('⏳ AA switch: selectPlayer in progress, waiting for guard to release...');
+            unawaited(() async {
+              for (int i = 0; i < 20; i++) {
+                await Future.delayed(const Duration(milliseconds: 50));
+                if (!_selectPlayerInProgress) break;
+              }
+              _logger.log('🎵 AA switch: retrying selectPlayer for "${builtinPlayer.name}"');
+              selectPlayer(builtinPlayer);
+              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayer.playerId));
+            }());
+          } else {
+            selectPlayer(builtinPlayer);
+            // Proactively restore queue so the play button works immediately
+            unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayer.playerId));
+          }
         } else {
           // Players list not yet populated — mark as pending, resolved in _loadAndSelectPlayers
           final availableIds = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
