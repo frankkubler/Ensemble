@@ -4544,8 +4544,9 @@ class MusicAssistantProvider with ChangeNotifier {
         // This overrides any other selection logic to ensure that repeated calls to
         // _loadAndSelectPlayers during an AA session never re-select SOUNDBAR_BT.
         if (_aaSessionActive && builtinPlayerId != null) {
+          final resolvedBuiltinId = builtinPlayerId;
           final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
-            (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId),
+            (p) => _matchesBuiltinId(p!.playerId, resolvedBuiltinId),
             orElse: () => null,
           );
           if (builtinPlayer != null) {
@@ -4557,12 +4558,12 @@ class MusicAssistantProvider with ChangeNotifier {
             }
             _pendingAASwitch = false;
           } else {
-            _logger.log('🚗 AA session active: builtin player $builtinPlayerId not yet in list, marking pending');
+            _logger.log('🚗 AA session active: builtin player $resolvedBuiltinId not yet in list, marking pending');
             _pendingAASwitch = true;
           }
           if (playerToSelect != null) {
             selectPlayer(playerToSelect);
-            unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+            unawaited(_proactivelyRestoreQueueAfterAAReconnect(resolvedBuiltinId));
           }
           unawaited(_preloadAdjacentPlayers(preloadAll: true));
           return;
