@@ -312,8 +312,23 @@ class MusicAssistantAPI {
       if (eventType != null) {
         // Get the object_id (player_id for player events)
         final objectId = data['object_id'] as String?;
-        final eventData = data['data'] as Map<String, dynamic>? ?? {};
 
+        // data['data'] can be Map, String, double, or null depending on event type:
+        //   player_updated  → Map (player object)
+        //   queue_updated   → Map (queue object)
+        //   queue_time_updated → double (elapsed playback time)
+        //   queue_items_updated → String (queue_id)
+        // Use 'is' check instead of 'as' cast to avoid TypeError on non-Map payloads.
+        final rawData = data['data'];
+        final Map<String, dynamic> eventData;
+        if (rawData is Map<String, dynamic>) {
+          eventData = rawData;
+        } else if (rawData != null) {
+          // Preserve scalar/non-Map values under 'value' so subscribers can read them.
+          eventData = {'value': rawData};
+        } else {
+          eventData = {};
+        }
 
         // Include object_id in event data so listeners can filter by player
         final enrichedData = {

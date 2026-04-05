@@ -673,7 +673,9 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
     // This keeps queue UI in sync when MA adds/removes items (e.g., radio mode)
     _queueItemsSubscription = api.queueItemsUpdatedEvents.listen((event) {
       if (!mounted) return;
-      final playerId = event['queue_id'] as String?;
+      // object_id from the MA event is mapped to 'player_id' in enrichedData.
+      // For queue_items_updated the object_id IS the queue_id (queue_id == player_id in MA).
+      final playerId = event['player_id'] as String?;
       final selectedPlayer = maProvider.selectedPlayer;
       // Only refresh if the event is for our current player
       if (playerId != null && selectedPlayer != null && playerId == selectedPlayer.playerId) {
