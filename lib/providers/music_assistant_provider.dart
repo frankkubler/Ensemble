@@ -149,6 +149,19 @@ class MusicAssistantProvider with ChangeNotifier {
   // Player that was active before AA connected (to pause it on switch).
   String? _preAASelectedPlayerId;
 
+  /// Returns true when [serverId] (as returned by the MA server) represents
+  /// the same player as [storedId] (stored locally via Sendspin registration).
+  ///
+  /// The MA server prepends 'up' and lowercases Sendspin player IDs:
+  ///   stored:  "ensemble_frank_CP1A.260"
+  ///   server:  "upensemble_frank_cp1a.260"
+  static bool _matchesBuiltinId(String serverId, String storedId) {
+    if (serverId == storedId) return true;
+    final sl = storedId.toLowerCase();
+    final ml = serverId.toLowerCase();
+    return ml == sl || ml == 'up$sl';
+  }
+
   // PCM audio player for raw Sendspin audio streaming
   PcmAudioPlayer? _pcmAudioPlayer;
 
@@ -2177,14 +2190,15 @@ class MusicAssistantProvider with ChangeNotifier {
       // but do NOT pause it — the soundbar is an independent device and should
       // keep playing at home while AA takes over on the phone.
       final previous = _selectedPlayer;
-      if (previous != null && previous.playerId != builtinPlayerId) {
+      if (previous != null && !_matchesBuiltinId(previous.playerId, builtinPlayerId)) {
         _preAASelectedPlayerId = previous.playerId;
         _logger.log('🎵 AA connected: keeping "${previous.name}" playing, switching app to phone');
       }
 
-      if (_selectedPlayer?.playerId != builtinPlayerId) {
+      if (_selectedPlayer?.playerId != builtinPlayerId &&
+          !_matchesBuiltinId(_selectedPlayer?.playerId ?? '', builtinPlayerId)) {
         final builtinPlayer = _availablePlayers
-            .where((p) => p.playerId == builtinPlayerId)
+            .where((p) => _matchesBuiltinId(p.playerId, builtinPlayerId))
             .firstOrNull;
         if (builtinPlayer != null) {
           _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
@@ -2201,14 +2215,14 @@ class MusicAssistantProvider with ChangeNotifier {
             if (!_pendingAASwitch) return; // already resolved
             final freshPlayers = await getPlayers();
             final retryPlayer = freshPlayers.cast<Player?>().firstWhere(
-              (p) => p!.playerId == builtinPlayerId,
+              (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId),
               orElse: () => null,
             );
             if (retryPlayer != null) {
               _logger.log('✅ AA switch retry resolved: selecting "${retryPlayer.name}"');
               _pendingAASwitch = false;
               selectPlayer(retryPlayer);
-              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+              unawaited(_proactivelyRestoreQueueAfterAAReconnect(retryPlayer.playerId));
             } else {
               final retryIds = freshPlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
               _logger.log('❌ AA switch retry failed — still not found in: [$retryIds]');
@@ -4310,7 +4324,23 @@ class MusicAssistantProvider with ChangeNotifier {
       }
 
       final allPlayers = await getPlayers();
-      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+      var builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+
+      // Normalize stored builtin ID to the canonical server-assigned form.
+      // MA server prepends 'up' and lowercases Sendspin player IDs, e.g.:
+      //   stored: "ensemble_frank_CP1A.260" → server: "upensemble_frank_cp1a.260"
+      // Update the stored value so all subsequent comparisons use exact match.
+      if (builtinPlayerId != null) {
+        final serverMatch = allPlayers.cast<Player?>().firstWhere(
+          (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId!),
+          orElse: () => null,
+        );
+        if (serverMatch != null && serverMatch.playerId != builtinPlayerId) {
+          _logger.log('🔧 Builtin ID normalized: $builtinPlayerId → ${serverMatch.playerId}');
+          builtinPlayerId = serverMatch.playerId;
+          await SettingsService.setBuiltinPlayerId(serverMatch.playerId);
+        }
+      }
 
       _logger.log('🎛️ getPlayers returned ${allPlayers.length} players:');
 
@@ -4348,7 +4378,7 @@ class MusicAssistantProvider with ChangeNotifier {
         }
 
         if (!player.available) {
-          if (builtinPlayerId != null && player.playerId == builtinPlayerId) {
+          if (builtinPlayerId != null && _matchesBuiltinId(player.playerId, builtinPlayerId)) {
             return true;
           }
           filteredCount++;
@@ -4576,7 +4606,7 @@ class MusicAssistantProvider with ChangeNotifier {
         // Try available first, then accept unavailable (Sendspin may still be registering)
         if (playerToSelect == null && builtinPlayerId != null) {
           playerToSelect = _availablePlayers.cast<Player?>().firstWhere(
-            (p) => p!.playerId == builtinPlayerId && p.available,
+            (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId!) && p.available,
             orElse: () => null,
           );
           if (playerToSelect != null) {
@@ -4584,7 +4614,7 @@ class MusicAssistantProvider with ChangeNotifier {
           } else {
             // Player exists but not yet available (Sendspin registration in progress)
             playerToSelect = _availablePlayers.cast<Player?>().firstWhere(
-              (p) => p!.playerId == builtinPlayerId,
+              (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId!),
               orElse: () => null,
             );
             if (playerToSelect != null) {
@@ -4619,14 +4649,14 @@ class MusicAssistantProvider with ChangeNotifier {
           final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
           if (builtinPlayerId != null) {
             final builtin = _availablePlayers.cast<Player?>().firstWhere(
-              (p) => p!.playerId == builtinPlayerId,
+              (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId!),
               orElse: () => null,
             );
             if (builtin != null) {
               _logger.log('✅ Pending AA switch resolved: selecting "${builtin.name}"');
               _pendingAASwitch = false;
               selectPlayer(builtin);
-              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+              unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtin.playerId));
             } else {
               final ids = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
               _logger.log('⚠️ Pending AA switch: builtin $builtinPlayerId still not in [$ids]');

@@ -1061,8 +1061,12 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         Player? candidate;
 
         if (builtinPlayerId != null) {
+          final idLower = builtinPlayerId.toLowerCase();
           candidate = allPlayers
-              .where((p) => p.playerId == builtinPlayerId && p.available)
+              .where((p) => p.available &&
+                  (p.playerId == builtinPlayerId ||
+                   p.playerId.toLowerCase() == idLower ||
+                   p.playerId.toLowerCase() == 'up$idLower'))
               .firstOrNull;
           if (candidate == null) {
             final ids = allPlayers.map((p) => '${p.name}(${p.playerId},avail=${p.available})').join(', ');
