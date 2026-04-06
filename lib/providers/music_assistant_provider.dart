@@ -2187,7 +2187,6 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onAAConnected = () async {
       _suppressSendspinAutoResume = false;
-      _pendingAASwitch = false;
       _aaSessionActive = true;
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId == null) return;
@@ -2201,32 +2200,28 @@ class MusicAssistantProvider with ChangeNotifier {
         _logger.log('🎵 AA connected: keeping "${previous.name}" playing, switching app to phone');
       }
 
-      if (_selectedPlayer?.playerId != builtinPlayerId &&
-          !_matchesBuiltinId(_selectedPlayer?.playerId ?? '', builtinPlayerId)) {
-        final builtinPlayer = _availablePlayers
-            .where((p) => _matchesBuiltinId(p.playerId, builtinPlayerId))
-            .firstOrNull;
-        if (builtinPlayer != null) {
-          _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
-          // If selectPlayer is currently blocked by the reentrancy guard, mark as pending.
-          // _loadAndSelectPlayers will resolve it via _aaSessionActive on its next call.
-          if (_selectPlayerInProgress) {
-            _logger.log('⏳ AA switch: selectPlayer in progress, marking _pendingAASwitch for next _loadAndSelectPlayers');
-            _pendingAASwitch = true;
-          } else {
-            selectPlayer(builtinPlayer);
-            // Proactively restore queue so the play button works immediately
-            unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayer.playerId));
-          }
-        } else {
-          // Players list not yet populated — mark as pending, resolved in _loadAndSelectPlayers
-          final availableIds = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
-          _logger.log('⚠️ AA connected but builtin ($builtinPlayerId) not in list yet — available: [$availableIds]');
+      // Wait a moment for builtin player to register (Sendspin may still be initializing)
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      // Try to select builtin
+      final builtinPlayer = _availablePlayers
+          .where((p) => _matchesBuiltinId(p.playerId, builtinPlayerId))
+          .firstOrNull;
+      if (builtinPlayer != null) {
+        _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
+        if (_selectPlayerInProgress) {
+          _logger.log('⏳ AA switch: selectPlayer in progress, marking _pendingAASwitch for next _loadAndSelectPlayers');
           _pendingAASwitch = true;
+        } else {
+          selectPlayer(builtinPlayer);
+          // Proactively restore queue so the play button works immediately
+          unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayer.playerId));
         }
       } else {
-        // Already on builtin player, still restore queue in case server lost it
-        unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
+        // If still not available, mark as pending for _loadAndSelectPlayers to resolve
+        final availableIds = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
+        _logger.log('⚠️ AA connected but builtin ($builtinPlayerId) still not in list — available: [$availableIds]');
+        _pendingAASwitch = true;
       }
     };
     audioHandler.onAADisconnected = () async {
