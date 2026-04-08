@@ -6,21 +6,24 @@ import '../services/debug_logger.dart';
 import '../services/error_handler.dart';
 import '../services/auth/auth_manager.dart';
 
-/// Callback types for connection events
-typedef OnConnected = Future<void> Function();
-typedef OnAuthenticated = Future<void> Function();
-typedef OnDisconnected = void Function();
+/// Called right after the [MusicAssistantAPI] instance is (re)created,
+/// before [connect()] is invoked. Use this to subscribe to API event streams.
+typedef OnApiCreated = void Function(MusicAssistantAPI api);
+
+/// Called once the server is ready for initialization
+/// (connected without auth, or authentication succeeded).
+typedef OnReadyForInit = Future<void> Function();
 
 /// Provider for connection state management.
 ///
-/// Extracted from MusicAssistantProvider to handle:
+/// Handles:
 /// - WebSocket connection lifecycle
-/// - Authentication flow (MA token, credentials)
-/// - Reconnection logic
-/// - Connection state broadcasting
+/// - Authentication flow (token, credentials, long-lived tokens)
+/// - User settings capture (provider/player filters, profile name)
 ///
-/// Note: This is a partial extraction. Full integration requires updating
-/// all consumers to use this provider directly.
+/// Integrated into [MusicAssistantProvider] via composition:
+/// MAP holds a [ConnectionProvider], wires its callbacks and exposes
+/// delegating getters so all existing consumers remain unchanged.
 class ConnectionProvider with ChangeNotifier {
   final DebugLogger _logger = DebugLogger();
   final AuthManager _authManager = AuthManager();
@@ -32,10 +35,15 @@ class ConnectionProvider with ChangeNotifier {
 
   StreamSubscription? _connectionStateSubscription;
 
-  // Callbacks for connection events - set by the facade provider
-  OnConnected? onConnected;
-  OnAuthenticated? onAuthenticated;
-  OnDisconnected? onDisconnected;
+  // ─── Callbacks wired by MusicAssistantProvider ──────────────────────────────
+
+  /// Called right after the API instance is (re)created.
+  /// MAP uses this to resubscribe to playerUpdated / mediaItemAdded events.
+  OnApiCreated? onApiCreated;
+
+  /// Called when the connection is ready for initialization.
+  /// Replaces the old onConnected + onAuthenticated pair.
+  OnReadyForInit? onReadyForInit;
 
   // User settings captured during authentication
   List<String> _providerFilter = [];
@@ -59,49 +67,131 @@ class ConnectionProvider with ChangeNotifier {
   List<String> get playerFilter => _playerFilter;
 
   // ============================================================================
+  // AUTH HELPERS
+  // ============================================================================
+
+  /// Pre-load a stored token into the auth manager before the first [connect()].
+  Future<void> restoreAuth() async {
+    final storedToken = await SettingsService.getMaAuthToken();
+    if (storedToken != null) {
+      _logger.log('🔐 Restoring saved MA token...');
+      _authManager.setToken(storedToken);
+      _logger.log('🔐 Auth token restored');
+    }
+  }
+
+  /// Fetch and store user settings (profile name, provider/player filters).
+  /// Called automatically after successful authentication; MAP can also call
+  /// this directly from _initializeAfterConnection when authRequired is set.
+  Future<void> fetchUserSettings() async {
+    if (_api == null) return;
+
+    try {
+      final userInfo = await _api!.getCurrentUserInfo();
+      if (userInfo == null) return;
+
+      // Set profile name
+      final displayName = userInfo['display_name'] as String?;
+      final username = userInfo['username'] as String?;
+      final profileName =
+          (displayName != null && displayName.isNotEmpty) ? displayName : username;
+
+      if (profileName != null && profileName.isNotEmpty) {
+        await SettingsService.setOwnerName(profileName);
+        _logger.log('✅ Set owner name from MA profile: $profileName');
+      }
+
+      // Capture provider filter (empty = all providers allowed)
+      final providerFilterRaw = userInfo['provider_filter'];
+      if (providerFilterRaw is List) {
+        _providerFilter = providerFilterRaw.cast<String>().toList();
+        if (_providerFilter.isNotEmpty) {
+          _logger.log('🔒 Provider filter active: ${_providerFilter.length} providers allowed');
+          _logger.log('   Allowed: ${_providerFilter.join(", ")}');
+        } else {
+          _logger.log('🔓 No provider filter - all providers visible');
+        }
+      } else {
+        _providerFilter = [];
+        _logger.log('🔓 No provider filter in user settings');
+      }
+
+      // Capture player filter (empty = all players allowed)
+      final playerFilterRaw = userInfo['player_filter'];
+      if (playerFilterRaw is List) {
+        _playerFilter = playerFilterRaw.cast<String>().toList();
+        if (_playerFilter.isNotEmpty) {
+          _logger.log('🔒 Player filter active: ${_playerFilter.length} players allowed');
+          _logger.log('   Allowed: ${_playerFilter.join(", ")}');
+        } else {
+          _logger.log('🔓 No player filter - all players visible');
+        }
+      } else {
+        _playerFilter = [];
+        _logger.log('🔓 No player filter in user settings');
+      }
+    } catch (e) {
+      _logger.log('⚠️ Could not fetch user settings (non-fatal): $e');
+    }
+  }
+
+  // ============================================================================
   // CONNECTION
   // ============================================================================
 
-  /// Connect to the Music Assistant server
+  /// Connect to the Music Assistant server.
   Future<void> connect(String serverUrl) async {
     try {
       _error = null;
       _serverUrl = serverUrl;
       await SettingsService.setServerUrl(serverUrl);
 
-      // Dispose the old API to stop any pending reconnects
+      // Dispose old API to stop pending reconnects
       _api?.dispose();
 
       _api = MusicAssistantAPI(serverUrl, _authManager);
 
+      // Notify MAP so it can resubscribe to API event streams
+      onApiCreated?.call(_api!);
+
       _connectionStateSubscription?.cancel();
       _connectionStateSubscription = _api!.connectionState.listen(
         (state) async {
-          _connectionState = state;
-          notifyListeners();
-
           if (state == MAConnectionState.connected) {
             _logger.log('🔗 WebSocket connected to MA server');
 
             if (_api!.authRequired && !_api!.isAuthenticated) {
+              // Don't broadcast 'connected' yet — AppStartup watches isConnected
+              // and would navigate to HomeScreen before auth completes, causing
+              // all data fetches to fail with "Not authenticated".
               _logger.log('🔐 MA auth required, attempting authentication...');
               final authenticated = await _handleAuthentication();
               if (!authenticated) {
+                _connectionState = MAConnectionState.error;
                 _error = 'Authentication required. Please log in again.';
                 notifyListeners();
-                return;
               }
+              // The 'authenticated' event fires next and is handled below
               return;
             }
 
-            // No auth required, trigger callback
-            await onConnected?.call();
+            // No auth required — safe to broadcast and initialize
+            _connectionState = state;
+            notifyListeners();
+            await onReadyForInit?.call();
           } else if (state == MAConnectionState.authenticated) {
+            _connectionState = state;
+            notifyListeners();
             _logger.log('✅ MA authentication successful');
-            await onAuthenticated?.call();
+            await onReadyForInit?.call();
           } else if (state == MAConnectionState.disconnected) {
+            _connectionState = state;
+            notifyListeners();
+            // DON'T clear caches on disconnect — keep for instant resume
             _logger.log('📡 Disconnected - keeping cached data for instant resume');
-            onDisconnected?.call();
+          } else {
+            _connectionState = state;
+            notifyListeners();
           }
         },
         onError: (error) {
@@ -133,7 +223,7 @@ class ConnectionProvider with ChangeNotifier {
         final success = await _api!.authenticateWithToken(storedToken);
         if (success) {
           _logger.log('✅ MA authentication with stored token successful');
-          await _fetchUserSettings();
+          await fetchUserSettings();
           return true;
         }
         _logger.log('⚠️ Stored MA token invalid, clearing...');
@@ -161,7 +251,7 @@ class ConnectionProvider with ChangeNotifier {
             await SettingsService.setMaAuthToken(accessToken);
           }
 
-          await _fetchUserSettings();
+          await fetchUserSettings();
           return true;
         }
       }
@@ -174,66 +264,14 @@ class ConnectionProvider with ChangeNotifier {
     }
   }
 
-  Future<void> _fetchUserSettings() async {
-    if (_api == null) return;
-
-    try {
-      final userInfo = await _api!.getCurrentUserInfo();
-      if (userInfo == null) return;
-
-      // Set profile name
-      final displayName = userInfo['display_name'] as String?;
-      final username = userInfo['username'] as String?;
-      final profileName =
-          (displayName != null && displayName.isNotEmpty) ? displayName : username;
-
-      if (profileName != null && profileName.isNotEmpty) {
-        await SettingsService.setOwnerName(profileName);
-        _logger.log('✅ Set owner name from MA profile: $profileName');
-      }
-
-      // Capture provider filter
-      final providerFilterRaw = userInfo['provider_filter'];
-      if (providerFilterRaw is List) {
-        _providerFilter = providerFilterRaw.cast<String>().toList();
-        if (_providerFilter.isNotEmpty) {
-          _logger.log(
-              '🔒 Provider filter active: ${_providerFilter.length} providers allowed');
-        }
-      } else {
-        _providerFilter = [];
-      }
-
-      // Capture player filter
-      final playerFilterRaw = userInfo['player_filter'];
-      if (playerFilterRaw is List) {
-        _playerFilter = playerFilterRaw.cast<String>().toList();
-        if (_playerFilter.isNotEmpty) {
-          _logger.log(
-              '🔒 Player filter active: ${_playerFilter.length} players allowed');
-        }
-      } else {
-        _playerFilter = [];
-      }
-    } catch (e) {
-      _logger.log('⚠️ Could not fetch user settings (non-fatal): $e');
-    }
-  }
-
-  /// Disconnect from the server
+  /// Disconnect the WebSocket only.
+  /// Call this from MAP's disconnect() after tearing down Sendspin/PCM.
   Future<void> disconnect() async {
     _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = null;
     await _api?.disconnect();
     _connectionState = MAConnectionState.disconnected;
     notifyListeners();
-  }
-
-  /// Check connection and reconnect if needed
-  Future<void> checkAndReconnect() async {
-    if (_serverUrl != null && !isConnected) {
-      _logger.log('🔄 Attempting reconnection...');
-      await connect(_serverUrl!);
-    }
   }
 
   @override

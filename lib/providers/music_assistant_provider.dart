@@ -32,6 +32,8 @@ import '../constants/timings.dart';
 import '../services/database_service.dart';
 import '../services/library_status_service.dart';
 import '../main.dart' show audioHandler;
+import 'sleep_timer_provider.dart';
+import 'connection_provider.dart';
 
 /// Main provider that coordinates connection, player, and library state.
 ///
@@ -44,17 +46,25 @@ import '../main.dart' show audioHandler;
 /// - Player logic: Player selection, controls, local player
 /// - Library logic: Artists, albums, tracks, search
 class MusicAssistantProvider with ChangeNotifier {
-  MusicAssistantAPI? _api;
-  final AuthManager _authManager = AuthManager();
+  // Connection logic — delegated to ConnectionProvider
+  final ConnectionProvider _connectionProvider = ConnectionProvider();
+
+  // Private getter aliases so all internal code works unchanged
+  MusicAssistantAPI? get _api => _connectionProvider.api;
+  AuthManager get _authManager => _connectionProvider.authManager;
+  MAConnectionState get _connectionState => _connectionProvider.connectionState;
+  String? get _serverUrl => _connectionProvider.serverUrl;
+  List<String> get _providerFilter => _connectionProvider.providerFilter;
+  List<String> get _playerFilter => _connectionProvider.playerFilter;
+
+  // Local error state (init failures, sendspin errors, etc. outside of connection flow)
+  String? _error;
+
   final DebugLogger _logger = DebugLogger();
   final CacheService _cacheService = CacheService();
   final PositionTracker _positionTracker = PositionTracker();
   ImagePrefetchService? _imagePrefetchService;
   final GroupVolumeManager _groupVolumeManager = GroupVolumeManager();
-
-  MAConnectionState _connectionState = MAConnectionState.disconnected;
-  String? _serverUrl;
-  String? _error;
 
   // Library state
   List<Artist> _artists = [];
@@ -90,11 +100,8 @@ class MusicAssistantProvider with ChangeNotifier {
   Timer? _playerStateTimer;
   Timer? _notificationPositionTimer; // Updates notification position every second for remote players
 
-  // Sleep timer state
-  Timer? _sleepTimer;
-  DateTime? _sleepTimerEndTime;
-  int? _sleepTimerMinutes; // null = off, -1 = end of track, positive = minutes
-  Timer? _sleepTimerDisplayTimer; // Updates remaining time display every second
+  // Sleep timer — delegated to SleepTimerProvider
+  final SleepTimerProvider _sleepTimerProvider = SleepTimerProvider();
 
   // Idle service timeout - stops foreground service after 30 min of no playback
   Timer? _idleServiceTimer;
@@ -116,7 +123,6 @@ class MusicAssistantProvider with ChangeNotifier {
   // Home refresh counter - increments to signal home screen to refresh all rows
   int _homeRefreshCounter = 0;
   String? _lastConnectedUrl; // Track last successfully connected server URL
-  StreamSubscription? _connectionStateSubscription;
   StreamSubscription? _localPlayerEventSubscription;
   StreamSubscription? _playerUpdatedEventSubscription;
   StreamSubscription? _playerAddedEventSubscription;
@@ -183,12 +189,8 @@ class MusicAssistantProvider with ChangeNotifier {
   final Map<String, String> _podcastCoverCache = {};
 
   // Provider filter: list of allowed provider instance IDs from MA user settings
-  // Empty list means all providers are allowed
-  List<String> _providerFilter = [];
-
-  // Player filter: list of allowed player IDs from MA user settings
-  // Empty list means all players are allowed
-  List<String> _playerFilter = [];
+  // Empty list means all providers are allowed — delegated to ConnectionProvider
+  // (getters _providerFilter / _playerFilter defined above as aliases)
 
   // User-controlled music provider filter (local settings in Ensemble)
   // Empty list means all providers are enabled (no filtering)
@@ -201,11 +203,10 @@ class MusicAssistantProvider with ChangeNotifier {
   // GETTERS
   // ============================================================================
 
-  MAConnectionState get connectionState => _connectionState;
-  String? get serverUrl => _serverUrl;
-  String? get error => _error;
-  bool get isConnected => _connectionState == MAConnectionState.connected ||
-                          _connectionState == MAConnectionState.authenticated;
+  MAConnectionState get connectionState => _connectionProvider.connectionState;
+  String? get serverUrl => _connectionProvider.serverUrl;
+  String? get error => _error ?? _connectionProvider.error;
+  bool get isConnected => _connectionProvider.isConnected;
 
   // Library getters with provider filtering applied
   List<Artist> get artists => filterByProvider(_artists);
@@ -628,14 +629,10 @@ class MusicAssistantProvider with ChangeNotifier {
 
   Track? get currentTrack => _currentTrack;
 
-  // Sleep timer getters
-  bool get sleepTimerActive => _sleepTimerMinutes != null;
-  int? get sleepTimerMinutes => _sleepTimerMinutes;
-  Duration? get sleepTimerRemaining {
-    if (_sleepTimerEndTime == null) return null;
-    final remaining = _sleepTimerEndTime!.difference(DateTime.now());
-    return remaining.isNegative ? Duration.zero : remaining;
-  }
+  // Sleep timer getters — delegated to SleepTimerProvider
+  bool get sleepTimerActive => _sleepTimerProvider.isActive;
+  int? get sleepTimerMinutes => _sleepTimerProvider.minutes;
+  Duration? get sleepTimerRemaining => _sleepTimerProvider.remaining;
 
   /// Whether we have cached players available (for instant UI display on app resume)
   bool get hasCachedPlayers => _cacheService.hasCachedPlayers;
@@ -900,11 +897,19 @@ class MusicAssistantProvider with ChangeNotifier {
 
   MusicAssistantProvider() {
     _localPlayer = LocalPlayerService(_authManager);
+    // Relay SleepTimerProvider notifications to our listeners
+    _sleepTimerProvider.addListener(notifyListeners);
+    // Wire up sleep timer expiry callback (needs access to pausePlayer)
+    _sleepTimerProvider.onExpired = _onSleepTimerExpired;
+    // Relay ConnectionProvider notifications and wire its callbacks
+    _connectionProvider.addListener(notifyListeners);
+    _connectionProvider.onApiCreated = _subscribeToApiEvents;
+    _connectionProvider.onReadyForInit = _initializeAfterConnection;
     _initialize();
   }
 
   Future<void> _initialize() async {
-    _serverUrl = await SettingsService.getServerUrl();
+    final serverUrl = await SettingsService.getServerUrl();
 
     // Load cached players from database for instant display (before connecting)
     await _loadPlayersFromDatabase();
@@ -924,9 +929,9 @@ class MusicAssistantProvider with ChangeNotifier {
     // Initialize offline action queue
     await OfflineActionQueue.instance.initialize();
 
-    if (_serverUrl != null && _serverUrl!.isNotEmpty) {
-      await _restoreAuthCredentials();
-      await connectToServer(_serverUrl!);
+    if (serverUrl != null && serverUrl.isNotEmpty) {
+      await _connectionProvider.restoreAuth();
+      await connectToServer(serverUrl);
       await _initializeLocalPlayback();
     }
   }
@@ -1141,223 +1146,47 @@ class MusicAssistantProvider with ChangeNotifier {
     }();
   }
 
-  Future<void> _restoreAuthCredentials() async {
-    final storedToken = await SettingsService.getMaAuthToken();
-    if (storedToken != null) {
-      _logger.log('🔐 Restoring saved MA token...');
-      _authManager.setToken(storedToken);
-      _logger.log('🔐 Auth token restored');
-    }
-  }
-
   // ============================================================================
   // CONNECTION
   // ============================================================================
 
-  Future<void> connectToServer(String serverUrl) async {
-    try {
-      _error = null;
-      _serverUrl = serverUrl;
-      await SettingsService.setServerUrl(serverUrl);
+  /// Delegate to ConnectionProvider. All connection/auth logic lives there.
+  Future<void> connectToServer(String serverUrl) =>
+      _connectionProvider.connect(serverUrl);
 
-      // Dispose the old API to stop any pending reconnects
-      _api?.dispose();
+  /// Called by ConnectionProvider.onApiCreated when a new API instance is created.
+  /// Resubscribes MAP's event handlers to the new API streams.
+  void _subscribeToApiEvents(MusicAssistantAPI api) {
+    _localPlayerEventSubscription?.cancel();
+    _localPlayerEventSubscription = api.builtinPlayerEvents.listen(
+      _handleLocalPlayerEvent,
+      onError: (error) => _logger.log('Builtin player event stream error: $error'),
+    );
 
-      _api = MusicAssistantAPI(serverUrl, _authManager);
+    _playerUpdatedEventSubscription?.cancel();
+    _playerUpdatedEventSubscription = api.playerUpdatedEvents.listen(
+      _handlePlayerUpdatedEvent,
+      onError: (error) => _logger.log('Player updated event stream error: $error'),
+    );
 
-      _connectionStateSubscription?.cancel();
-      _connectionStateSubscription = _api!.connectionState.listen(
-        (state) async {
-          if (state == MAConnectionState.connected) {
-            _logger.log('🔗 WebSocket connected to MA server');
+    _playerAddedEventSubscription?.cancel();
+    _playerAddedEventSubscription = api.playerAddedEvents.listen(
+      _handlePlayerAddedEvent,
+      onError: (error) => _logger.log('Player added event stream error: $error'),
+    );
 
-            if (_api!.authRequired && !_api!.isAuthenticated) {
-              // Don't broadcast 'connected' yet — AppStartup watches isConnected
-              // and would transition to HomeScreen before auth completes, causing
-              // data fetches to fail with "Not authenticated".
-              _logger.log('🔐 MA auth required, attempting authentication...');
-              final authenticated = await _handleMaAuthentication();
-              if (!authenticated) {
-                _connectionState = MAConnectionState.error;
-                _error = 'Authentication required. Please log in again.';
-                notifyListeners();
-                return;
-              }
-              // After authentication succeeds, authenticated state will trigger initialization
-              // Don't call _initializeAfterConnection() here - wait for authenticated state
-              return;
-            }
+    // Subscribe to library change events for instant UI updates
+    _mediaItemAddedEventSubscription?.cancel();
+    _mediaItemAddedEventSubscription = api.mediaItemAddedEvents.listen(
+      _handleMediaItemAddedEvent,
+      onError: (error) => _logger.log('Media item added event stream error: $error'),
+    );
 
-            // No auth required — safe to broadcast connected and initialize
-            _connectionState = state;
-            notifyListeners();
-            await _initializeAfterConnection();
-          } else if (state == MAConnectionState.authenticated) {
-            _connectionState = state;
-            notifyListeners();
-            _logger.log('✅ MA authentication successful');
-            // Now safe to initialize since we're authenticated
-            await _initializeAfterConnection();
-          } else if (state == MAConnectionState.disconnected) {
-            _connectionState = state;
-            notifyListeners();
-            // DON'T clear players or caches on disconnect!
-            // Keep showing cached data for instant UI display on reconnect
-            // Player list and state will be refreshed when connection is restored
-            _logger.log('📡 Disconnected - keeping cached players and data for instant resume');
-          } else {
-            _connectionState = state;
-            notifyListeners();
-          }
-        },
-        onError: (error) {
-          _logger.log('Connection state stream error: $error');
-          _connectionState = MAConnectionState.error;
-          notifyListeners();
-        },
-      );
-
-      _localPlayerEventSubscription?.cancel();
-      _localPlayerEventSubscription = _api!.builtinPlayerEvents.listen(
-        _handleLocalPlayerEvent,
-        onError: (error) => _logger.log('Builtin player event stream error: $error'),
-      );
-
-      _playerUpdatedEventSubscription?.cancel();
-      _playerUpdatedEventSubscription = _api!.playerUpdatedEvents.listen(
-        _handlePlayerUpdatedEvent,
-        onError: (error) => _logger.log('Player updated event stream error: $error'),
-      );
-
-      _playerAddedEventSubscription?.cancel();
-      _playerAddedEventSubscription = _api!.playerAddedEvents.listen(
-        _handlePlayerAddedEvent,
-        onError: (error) => _logger.log('Player added event stream error: $error'),
-      );
-
-      // Subscribe to library change events for instant UI updates
-      _mediaItemAddedEventSubscription?.cancel();
-      _mediaItemAddedEventSubscription = _api!.mediaItemAddedEvents.listen(
-        _handleMediaItemAddedEvent,
-        onError: (error) => _logger.log('Media item added event stream error: $error'),
-      );
-
-      _mediaItemDeletedEventSubscription?.cancel();
-      _mediaItemDeletedEventSubscription = _api!.mediaItemDeletedEvents.listen(
-        _handleMediaItemDeletedEvent,
-        onError: (error) => _logger.log('Media item deleted event stream error: $error'),
-      );
-
-      await _api!.connect();
-      notifyListeners();
-    } catch (e) {
-      final errorInfo = ErrorHandler.handleError(e, context: 'Connect to server');
-      _error = errorInfo.userMessage;
-      _connectionState = MAConnectionState.error;
-      _logger.log('Connection error: ${errorInfo.technicalMessage}');
-      notifyListeners();
-      rethrow;
-    }
-  }
-
-  Future<bool> _handleMaAuthentication() async {
-    if (_api == null) return false;
-
-    try {
-      final storedToken = await SettingsService.getMaAuthToken();
-      if (storedToken != null) {
-        _logger.log('🔐 Trying stored MA token...');
-        final success = await _api!.authenticateWithToken(storedToken);
-        if (success) {
-          _logger.log('✅ MA authentication with stored token successful');
-          await _fetchUserSettings();
-          return true;
-        }
-        _logger.log('⚠️ Stored MA token invalid, clearing...');
-        await SettingsService.clearMaAuthToken();
-      }
-
-      final username = await SettingsService.getUsername();
-      final password = await SettingsService.getPassword();
-
-      if (username != null && password != null && username.isNotEmpty && password.isNotEmpty) {
-        _logger.log('🔐 Trying stored credentials...');
-        final accessToken = await _api!.loginWithCredentials(username, password);
-
-        if (accessToken != null) {
-          _logger.log('✅ MA login with stored credentials successful');
-
-          final longLivedToken = await _api!.createLongLivedToken();
-          if (longLivedToken != null) {
-            await SettingsService.setMaAuthToken(longLivedToken);
-            _logger.log('✅ Saved new long-lived MA token');
-          } else {
-            await SettingsService.setMaAuthToken(accessToken);
-          }
-
-          await _fetchUserSettings();
-          return true;
-        }
-      }
-
-      _logger.log('❌ MA authentication failed - no valid token or credentials');
-      return false;
-    } catch (e) {
-      _logger.log('❌ MA authentication error: $e');
-      return false;
-    }
-  }
-
-  Future<void> _fetchUserSettings() async {
-    if (_api == null) return;
-
-    try {
-      final userInfo = await _api!.getCurrentUserInfo();
-      if (userInfo == null) return;
-
-      // Set profile name
-      final displayName = userInfo['display_name'] as String?;
-      final username = userInfo['username'] as String?;
-
-      final profileName = (displayName != null && displayName.isNotEmpty) ? displayName : username;
-
-      if (profileName != null && profileName.isNotEmpty) {
-        await SettingsService.setOwnerName(profileName);
-        _logger.log('✅ Set owner name from MA profile: $profileName');
-      }
-
-      // Capture provider filter (empty list = all providers allowed)
-      final providerFilterRaw = userInfo['provider_filter'];
-      if (providerFilterRaw is List) {
-        _providerFilter = providerFilterRaw.cast<String>().toList();
-        if (_providerFilter.isNotEmpty) {
-          _logger.log('🔒 Provider filter active: ${_providerFilter.length} providers allowed');
-          _logger.log('   Allowed: ${_providerFilter.join(", ")}');
-        } else {
-          _logger.log('🔓 No provider filter - all providers visible');
-        }
-      } else {
-        _providerFilter = [];
-        _logger.log('🔓 No provider filter in user settings');
-      }
-
-      // Capture player filter (empty list = all players allowed)
-      final playerFilterRaw = userInfo['player_filter'];
-      if (playerFilterRaw is List) {
-        _playerFilter = playerFilterRaw.cast<String>().toList();
-        if (_playerFilter.isNotEmpty) {
-          _logger.log('🔒 Player filter active: ${_playerFilter.length} players allowed');
-          _logger.log('   Allowed: ${_playerFilter.join(", ")}');
-        } else {
-          _logger.log('🔓 No player filter - all players visible');
-        }
-      } else {
-        _playerFilter = [];
-        _logger.log('🔓 No player filter in user settings');
-      }
-    } catch (e) {
-      _logger.log('⚠️ Could not fetch user settings (non-fatal): $e');
-    }
+    _mediaItemDeletedEventSubscription?.cancel();
+    _mediaItemDeletedEventSubscription = api.mediaItemDeletedEvents.listen(
+      _handleMediaItemDeletedEvent,
+      onError: (error) => _logger.log('Media item deleted event stream error: $error'),
+    );
   }
 
   /// Load available music providers from MA and restore saved filter settings
@@ -1458,7 +1287,7 @@ class MusicAssistantProvider with ChangeNotifier {
       await _api!.fetchState();
 
       if (_api!.authRequired) {
-        await _fetchUserSettings();
+        await _connectionProvider.fetchUserSettings();
       }
 
       // Load available music providers and user's filter preferences
@@ -2017,8 +1846,7 @@ class MusicAssistantProvider with ChangeNotifier {
       await _sendspinService?.disconnect();
       _sendspinConnected = false;
     }
-    await _api?.disconnect();
-    _connectionState = MAConnectionState.disconnected;
+    await _connectionProvider.disconnect();
     // DON'T clear caches or player state - keep for instant reconnect
     _logger.log('📡 Explicit disconnect - keeping cached data for instant resume');
     notifyListeners();
@@ -5444,7 +5272,7 @@ class MusicAssistantProvider with ChangeNotifier {
         if (trackChanged) {
           // Check "end of track" sleep timer - previous track just ended
           if (_currentTrack != null) {
-            checkEndOfTrackSleepTimer();
+            _sleepTimerProvider.checkEndOfTrack();
           }
 
           // Check if cached track has better metadata (images, proper artist info)
@@ -6499,91 +6327,22 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   // ============================================================================
-  // SLEEP TIMER
+  // SLEEP TIMER — delegated to SleepTimerProvider
   // ============================================================================
 
   /// Set sleep timer. Pass null to turn off, -1 for end of track, or minutes.
-  void setSleepTimer(int? minutes) {
-    // Cancel any existing timer
-    _cancelSleepTimerInternal();
-
-    _sleepTimerMinutes = minutes;
-
-    if (minutes == null) {
-      // Timer off
-      _logger.log('😴 Sleep timer: OFF');
-      notifyListeners();
-      return;
-    }
-
-    if (minutes == -1) {
-      // End of track - handled in player state updates
-      _sleepTimerEndTime = null; // No fixed end time
-      _logger.log('😴 Sleep timer: End of track');
-      notifyListeners();
-      return;
-    }
-
-    // Set timer for specified minutes
-    _sleepTimerEndTime = DateTime.now().add(Duration(minutes: minutes));
-    _logger.log('😴 Sleep timer: $minutes minutes (until $_sleepTimerEndTime)');
-
-    // Create the actual timer
-    _sleepTimer = Timer(Duration(minutes: minutes), _onSleepTimerExpired);
-
-    // Start display update timer (every second for countdown)
-    _sleepTimerDisplayTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      notifyListeners(); // Update UI with remaining time
-    });
-
-    notifyListeners();
-  }
+  void setSleepTimer(int? minutes) => _sleepTimerProvider.setTimer(minutes);
 
   /// Cancel sleep timer
-  void cancelSleepTimer() {
-    _cancelSleepTimerInternal();
-    _sleepTimerMinutes = null;
-    _sleepTimerEndTime = null;
-    _logger.log('😴 Sleep timer: Cancelled');
-    notifyListeners();
-  }
+  void cancelSleepTimer() => _sleepTimerProvider.cancel();
 
-  void _cancelSleepTimerInternal() {
-    _sleepTimer?.cancel();
-    _sleepTimer = null;
-    _sleepTimerDisplayTimer?.cancel();
-    _sleepTimerDisplayTimer = null;
-  }
-
+  /// Called by SleepTimerProvider when the timer expires.
   void _onSleepTimerExpired() {
-    _logger.log('😴 Sleep timer expired - pausing playback');
-    _cancelSleepTimerInternal();
-    _sleepTimerMinutes = null;
-    _sleepTimerEndTime = null;
-
-    // Pause the current player
     final playerId = _selectedPlayer?.playerId;
     if (playerId != null) {
       pausePlayer(playerId);
     }
-
-    notifyListeners();
-  }
-
-  /// Called when track ends - checks if "end of track" sleep timer is active
-  void checkEndOfTrackSleepTimer() {
-    if (_sleepTimerMinutes == -1) {
-      _logger.log('😴 End of track sleep timer triggered');
-      _sleepTimerMinutes = null;
-
-      // Pause the current player
-      final playerId = _selectedPlayer?.playerId;
-      if (playerId != null) {
-        pausePlayer(playerId);
-      }
-
-      notifyListeners();
-    }
+    // notifyListeners() is handled by SleepTimerProvider -> addListener relay
   }
 
   /// Sync a player to the currently selected player (temporary group)
@@ -7076,10 +6835,8 @@ class MusicAssistantProvider with ChangeNotifier {
     _playerStateTimer?.cancel();
     _notificationPositionTimer?.cancel();
     _localPlayerStateReportTimer?.cancel();
-    _sleepTimer?.cancel();
-    _sleepTimerDisplayTimer?.cancel();
+    _sleepTimerProvider.dispose();
     _idleServiceTimer?.cancel();
-    _connectionStateSubscription?.cancel();
     _localPlayerEventSubscription?.cancel();
     _playerUpdatedEventSubscription?.cancel();
     _playerAddedEventSubscription?.cancel();
@@ -7088,7 +6845,7 @@ class MusicAssistantProvider with ChangeNotifier {
     _positionTracker.dispose();
     _pcmAudioPlayer?.dispose();
     _sendspinService?.dispose();
-    _api?.dispose();
+    _connectionProvider.dispose();
     super.dispose();
   }
 
