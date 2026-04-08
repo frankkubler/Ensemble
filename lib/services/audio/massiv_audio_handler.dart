@@ -13,6 +13,7 @@ import '../sync_service.dart';
 import '../../providers/music_assistant_provider.dart';
 import '../../models/media_item.dart' as ma;
 import '../../models/player.dart';
+import 'android_auto_browsing_delegate.dart';
 
 /// Custom AudioHandler for Ensemble that provides full control over
 /// notification actions and metadata updates.
@@ -47,18 +48,18 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   // Android Auto: provider reference (set after app initialises)
   MusicAssistantProvider? _autoProvider;
 
-  // Android Auto: track queue cache — maps context key to ordered track list.
-  // Populated during getChildren so playFromMediaId can queue the full album/playlist.
+  // Android Auto: browsing delegate — handles all category and item building.
+  // The track cache is owned here so playFromMediaId can access it directly.
   static const _maxTrackCacheEntries = 50;
   static const _maxChildSubjectEntries = 100;
   final Map<String, List<ma.Track>> _autoTrackCache = {};
+  late final AndroidAutoBrowsingDelegate _browsing = AndroidAutoBrowsingDelegate(
+    logger: _logger,
+    trackCache: _autoTrackCache,
+  );
 
-  void _cacheTrackList(String key, List<ma.Track> tracks) {
-    _autoTrackCache[key] = tracks;
-    while (_autoTrackCache.length > _maxTrackCacheEntries) {
-      _autoTrackCache.remove(_autoTrackCache.keys.first);
-    }
-  }
+  void _cacheTrackList(String key, List<ma.Track> tracks) =>
+      _browsing.cacheTrackList(key, tracks);
 
   // Android Auto: subjects for subscribeToChildren
   final Map<String, BehaviorSubject<Map<String, dynamic>>> _autoChildrenSubjects = {};
@@ -587,50 +588,23 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _logger.log('AndroidAuto: provider set');
   }
 
-  // Media ID constants — root categories
-  static const _autoIdHome = 'cat|home';
-  static const _autoIdMusic = 'cat|music';
-  static const _autoIdAudiobooks = 'cat|audiobooks';
-  static const _autoIdPodcasts = 'cat|podcasts';
-  static const _autoIdRadio = 'cat|radio';
-
-  // Media ID constants — Music subcategories
-  static const _autoIdPlaylists = 'cat|playlists';
-  static const _autoIdArtists = 'cat|artists';
-  static const _autoIdAlbums = 'cat|albums';
-  static const _autoIdFavorites = 'cat|favorites';
-
-  // Use an A-Z index for large lists to keep Android Auto browsing fast.
-  static const _autoAlphaIndexThreshold = 180;
-
-  // Media ID constants — Favourite subcategories
-  static const _autoIdFavArtists = 'cat|fav_artists';
-  static const _autoIdFavAlbums = 'cat|fav_albums';
-  static const _autoIdFavTracks = 'cat|fav_tracks';
-
-  // Media ID constants — Audiobook subcategories
-  static const _autoIdAbAuthors = 'cat|ab_authors';
-  static const _autoIdAbBooks = 'cat|ab_books';
-  static const _autoIdAbSeries = 'cat|ab_series';
-
-  // Android Auto content style hints
-  static const _gridHints = {
-    'android.media.browse.CONTENT_STYLE_BROWSABLE_HINT': 2,
-    'android.media.browse.CONTENT_STYLE_PLAYABLE_HINT': 2,
-  };
-
-  // Icon URIs for category items
-  static const _iconPkg = 'com.collotsspot.ensemble';
-  static final _iconHome = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_home');
-  static final _iconMusic = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_music');
-  static final _iconBook = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_book');
-  static final _iconPodcast = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_podcast');
-  static final _iconRadio = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_radio');
-  static final _iconArtist = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_artist');
-  static final _iconAlbum = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_album');
-  static final _iconPlaylist = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_playlist');
-  static final _iconFavorite = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_favorite');
-  static final _iconStartRadio = Uri.parse('android.resource://$_iconPkg/drawable/ic_auto_radio');
+  // Convenience aliases for the delegate's media-ID constants (used in
+  // getChildren dispatch and subscribeToChildren).
+  static const _autoIdHome         = AndroidAutoBrowsingDelegate.autoIdHome;
+  static const _autoIdMusic        = AndroidAutoBrowsingDelegate.autoIdMusic;
+  static const _autoIdAudiobooks   = AndroidAutoBrowsingDelegate.autoIdAudiobooks;
+  static const _autoIdPodcasts     = AndroidAutoBrowsingDelegate.autoIdPodcasts;
+  static const _autoIdRadio        = AndroidAutoBrowsingDelegate.autoIdRadio;
+  static const _autoIdPlaylists    = AndroidAutoBrowsingDelegate.autoIdPlaylists;
+  static const _autoIdArtists      = AndroidAutoBrowsingDelegate.autoIdArtists;
+  static const _autoIdAlbums       = AndroidAutoBrowsingDelegate.autoIdAlbums;
+  static const _autoIdFavorites    = AndroidAutoBrowsingDelegate.autoIdFavorites;
+  static const _autoIdFavArtists   = AndroidAutoBrowsingDelegate.autoIdFavArtists;
+  static const _autoIdFavAlbums    = AndroidAutoBrowsingDelegate.autoIdFavAlbums;
+  static const _autoIdFavTracks    = AndroidAutoBrowsingDelegate.autoIdFavTracks;
+  static const _autoIdAbAuthors    = AndroidAutoBrowsingDelegate.autoIdAbAuthors;
+  static const _autoIdAbBooks      = AndroidAutoBrowsingDelegate.autoIdAbBooks;
+  static const _autoIdAbSeries     = AndroidAutoBrowsingDelegate.autoIdAbSeries;
 
   // Custom now-playing action buttons for Android Auto
   // Icons change based on current state for visual feedback
@@ -747,55 +721,56 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   Future<List<MediaItem>> _autoGetChildren(
       MusicAssistantProvider provider, String parentMediaId) async {
+    final b = _browsing;
     switch (parentMediaId) {
       // Root
       case AudioService.browsableRootId:
-        return _autoBuildRoot();
+        return b.buildRoot();
 
       // Home — subcategory folders matching user's homescreen settings
       case _autoIdHome:
-        return _autoBuildHome();
+        return b.buildHome();
 
       // Music
       case _autoIdMusic:
-        return _autoBuildMusicCategories();
+        return b.buildMusicCategories();
       case _autoIdPlaylists:
-        return _autoBuildPlaylistList(provider);
+        return b.buildPlaylistList(provider);
       case _autoIdArtists:
-        return _autoBuildArtistList(provider);
+        return b.buildArtistList(provider);
       case _autoIdAlbums:
-        return _autoBuildAlbumList(provider);
+        return b.buildAlbumList(provider);
       case _autoIdFavorites:
-        return _autoBuildFavoriteCategories();
+        return b.buildFavoriteCategories();
       case _autoIdFavArtists:
-        return _autoBuildFavArtists(provider);
+        return b.buildFavArtists(provider);
       case _autoIdFavAlbums:
-        return _autoBuildFavAlbums(provider);
+        return b.buildFavAlbums(provider);
       case _autoIdFavTracks:
-        return _autoBuildFavTracks(provider);
+        return b.buildFavTracks(provider);
 
       // Audiobooks
       case _autoIdAudiobooks:
-        return _autoBuildAudiobookCategories();
+        return b.buildAudiobookCategories();
       case _autoIdAbAuthors:
-        return _autoBuildAudiobookAuthorList(provider);
+        return b.buildAudiobookAuthorList(provider);
       case _autoIdAbBooks:
-        return _autoBuildAudiobookList(provider);
+        return b.buildAudiobookList(provider);
       case _autoIdAbSeries:
-        return _autoBuildAudiobookSeriesList(provider);
+        return b.buildAudiobookSeriesList(provider);
 
       // Podcasts
       case _autoIdPodcasts:
-        return _autoBuildPodcastList(provider);
+        return b.buildPodcastList(provider);
 
       // Radio
       case _autoIdRadio:
-        return _autoBuildRadioList(provider);
+        return b.buildRadioList(provider);
 
       default:
         // Home row content (home|recent-albums, etc.)
         if (parentMediaId.startsWith('home|')) {
-          return _autoBuildHomeRowContent(provider, parentMediaId.substring(5));
+          return b.buildHomeRowContent(provider, parentMediaId.substring(5));
         }
         return _autoBuildDynamicChildren(provider, parentMediaId);
     }
@@ -806,44 +781,45 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       MusicAssistantProvider provider, String parentMediaId) async {
     final parts = parentMediaId.split('|');
     if (parts.length < 2) return [];
+    final b = _browsing;
 
     switch (parts[0]) {
       case 'artists_alpha':
         if (parts.length >= 2) {
-          return _autoBuildArtistList(provider, alphaFilter: parts[1]);
+          return b.buildArtistList(provider, alphaFilter: parts[1]);
         }
       case 'albums_alpha':
         if (parts.length >= 2) {
-          return _autoBuildAlbumList(provider, alphaFilter: parts[1]);
+          return b.buildAlbumList(provider, alphaFilter: parts[1]);
         }
       case 'tracks_alpha':
         if (parts.length >= 3) {
           final ctxKey = Uri.decodeComponent(parts[1]);
           final alpha = parts[2];
           final tracks = _autoTrackCache[ctxKey] ?? const <ma.Track>[];
-          return _autoBuildTrackItems(provider, tracks, ctxKey, alphaFilter: alpha);
+          return b.buildTrackItems(provider, tracks, ctxKey, alphaFilter: alpha);
         }
       case 'playlist':
         if (parts.length >= 3) {
-          return _autoBuildPlaylistTracks(provider, parts[1], parts[2]);
+          return b.buildPlaylistTracks(provider, parts[1], parts[2]);
         }
       case 'album':
         if (parts.length >= 3) {
-          return _autoBuildAlbumTracks(provider, parts[1], parts[2]);
+          return b.buildAlbumTracks(provider, parts[1], parts[2]);
         }
       case 'artist':
         final name = parts.sublist(1).join('|');
-        return _autoBuildArtistAlbums(provider, name);
+        return b.buildArtistAlbums(provider, name);
       case 'podcast':
         if (parts.length >= 3) {
-          return _autoBuildPodcastEpisodes(provider, parts[1], parts[2]);
+          return b.buildPodcastEpisodes(provider, parts[1], parts[2]);
         }
       case 'ab_author':
         final authorName = parts.sublist(1).join('|');
-        return _autoBuildAuthorAudiobooks(provider, authorName);
+        return b.buildAuthorAudiobooks(provider, authorName);
       case 'ab_series':
         final seriesPath = parts.sublist(1).join('|');
-        return _autoBuildSeriesAudiobooks(provider, seriesPath);
+        return b.buildSeriesAudiobooks(provider, seriesPath);
     }
 
     _logger.log('AndroidAuto: unhandled parentMediaId "$parentMediaId"');
@@ -1161,7 +1137,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           items.add(MediaItem(
             id: 'artist|${a.name}',
             title: a.name,
-            artUri: _autoArtUri(provider, a),
+            artUri: _browsing.artUri(provider, a),
             playable: false,
             extras: const {
               'android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT': 'Artists',
@@ -1177,7 +1153,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             id: 'album|${a.provider}|${a.itemId}',
             title: a.name,
             artist: a.artistsString,
-            artUri: _autoArtUri(provider, a),
+            artUri: _browsing.artUri(provider, a),
             playable: false,
             extras: const {
               'android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT': 'Albums',
@@ -1188,7 +1164,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
       // Group: Tracks
       for (final t in tracks) {
-        final item = _autoTrackItem(provider, t, ctxKey);
+        final item = _browsing.trackItem(provider, t, ctxKey);
         items.add(MediaItem(
           id: item.id,
           title: item.title,
@@ -1256,7 +1232,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         artist: artist,
         album: t.album?.name,
         duration: t.duration,
-        artUri: _autoArtUri(provider, t),
+        artUri: _browsing.artUri(provider, t),
       );
     }).toList();
     queue.add(items);
@@ -1301,651 +1277,6 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         processingState: AudioProcessingState.ready,
       ));
     }
-  }
-
-  // --- Root & category builders ---
-
-  List<MediaItem> _autoBuildRoot() {
-    return [
-      MediaItem(id: _autoIdHome, title: 'Home', playable: false,
-          artUri: _iconHome),
-      MediaItem(id: _autoIdMusic, title: 'Music', playable: false,
-          artUri: _iconMusic),
-      MediaItem(id: _autoIdAudiobooks, title: 'Audiobooks', playable: false,
-          artUri: _iconBook),
-      MediaItem(id: _autoIdPodcasts, title: 'Podcasts', playable: false,
-          artUri: _iconPodcast, extras: _gridHints),
-      MediaItem(id: _autoIdRadio, title: 'Radio', playable: false,
-          artUri: _iconRadio, extras: _gridHints),
-    ];
-  }
-
-  // Row ID → display title mapping
-  static const _homeRowTitles = {
-    'recent-albums': 'Recent Albums',
-    'discover-artists': 'Discover Artists',
-    'discover-albums': 'Discover Albums',
-    'continue-listening': 'Continue Listening',
-    'discover-audiobooks': 'Discover Audiobooks',
-    'discover-series': 'Discover Series',
-    'favorite-albums': 'Favourite Albums',
-    'favorite-artists': 'Favourite Artists',
-    'favorite-tracks': 'Favourite Tracks',
-    'favorite-playlists': 'Favourite Playlists',
-    'favorite-radio-stations': 'Favourite Radio',
-    'favorite-podcasts': 'Favourite Podcasts',
-  };
-
-  /// Home shows subcategory folders matching the user's homescreen settings.
-  Future<List<MediaItem>> _autoBuildHome() async {
-    final rowOrder = await SettingsService.getHomeRowOrder();
-    final items = <MediaItem>[];
-
-    for (final rowId in rowOrder) {
-      if (!await _isHomeRowEnabled(rowId)) continue;
-      final title = _homeRowTitles[rowId];
-      if (title == null) continue; // skip discovery rows for now
-      items.add(MediaItem(
-        id: 'home|$rowId',
-        title: title,
-        playable: false,
-        extras: _gridHints,
-      ));
-    }
-
-    _logger.log('AndroidAuto: Home built ${items.length} rows');
-    return items;
-  }
-
-  Future<bool> _isHomeRowEnabled(String rowId) async {
-    switch (rowId) {
-      case 'recent-albums': return SettingsService.getShowRecentAlbums();
-      case 'discover-artists': return SettingsService.getShowDiscoverArtists();
-      case 'discover-albums': return SettingsService.getShowDiscoverAlbums();
-      case 'continue-listening': return SettingsService.getShowContinueListeningAudiobooks();
-      case 'discover-audiobooks': return SettingsService.getShowDiscoverAudiobooks();
-      case 'discover-series': return SettingsService.getShowDiscoverSeries();
-      case 'favorite-albums': return SettingsService.getShowFavoriteAlbums();
-      case 'favorite-artists': return SettingsService.getShowFavoriteArtists();
-      case 'favorite-tracks': return SettingsService.getShowFavoriteTracks();
-      case 'favorite-playlists': return SettingsService.getShowFavoritePlaylists();
-      case 'favorite-radio-stations': return SettingsService.getShowFavoriteRadioStations();
-      case 'favorite-podcasts': return SettingsService.getShowFavoritePodcasts();
-      default: return false;
-    }
-  }
-
-  /// Build content for a specific home row.
-  Future<List<MediaItem>> _autoBuildHomeRowContent(
-      MusicAssistantProvider provider, String rowId) async {
-    switch (rowId) {
-      case 'recent-albums':
-        var albums = await provider.getRecentAlbumsWithCache();
-        if (albums.isEmpty) albums = SyncService.instance.cachedAlbums.take(20).toList();
-        return albums.take(20).map((a) => MediaItem(
-          id: 'album|${a.provider}|${a.itemId}',
-          title: a.name, artist: a.artistsString,
-          artUri: _autoArtUri(provider, a), playable: false,
-        )).toList();
-
-      case 'discover-artists':
-        var artists = await provider.getDiscoverArtistsWithCache();
-        if (artists.isEmpty) artists = SyncService.instance.cachedArtists.take(10).toList();
-        return artists.take(10).map((a) => MediaItem(
-          id: 'artist|${a.name}',
-          title: a.name,
-          artUri: _autoArtUri(provider, a), playable: false,
-        )).toList();
-
-      case 'discover-albums':
-        final albums = await provider.getDiscoverAlbumsWithCache();
-        return albums.take(20).map((a) => MediaItem(
-          id: 'album|${a.provider}|${a.itemId}',
-          title: a.name, artist: a.artistsString,
-          artUri: _autoArtUri(provider, a), playable: false,
-        )).toList();
-
-      case 'continue-listening':
-        final books = await provider.getInProgressAudiobooksWithCache();
-        return books.map((b) => MediaItem(
-          id: 'audiobook|${b.provider}|${b.itemId}',
-          title: b.name, artist: b.authorsString,
-          artUri: _autoArtUri(provider, b), playable: true,
-          extras: _audiobookExtras(b),
-        )).toList();
-
-      case 'discover-audiobooks':
-        final books = await provider.getDiscoverAudiobooksWithCache();
-        return books.map((b) => MediaItem(
-          id: 'audiobook|${b.provider}|${b.itemId}',
-          title: b.name, artist: b.authorsString,
-          artUri: _autoArtUri(provider, b), playable: true,
-          extras: _audiobookExtras(b),
-        )).toList();
-
-      case 'discover-series':
-        return _autoBuildAudiobookSeriesList(provider);
-
-      case 'favorite-albums':
-        final albums = await provider.getFavoriteAlbums();
-        return albums.map((a) => MediaItem(
-          id: 'album|${a.provider}|${a.itemId}',
-          title: a.name, artist: a.artistsString,
-          artUri: _autoArtUri(provider, a), playable: false,
-        )).toList();
-
-      case 'favorite-artists':
-        final artists = await provider.getFavoriteArtists();
-        return artists.map((a) => MediaItem(
-          id: 'artist|${a.name}',
-          title: a.name,
-          artUri: _autoArtUri(provider, a), playable: false,
-        )).toList();
-
-      case 'favorite-tracks':
-        final tracks = await provider.getFavoriteTracks();
-        const ctxKey = 'favs||';
-        _cacheTrackList(ctxKey, tracks);
-        return tracks.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
-
-      case 'favorite-playlists':
-        final playlists = await provider.getFavoritePlaylists();
-        return playlists.map((p) => MediaItem(
-          id: 'playlist|${p.provider}|${p.itemId}',
-          title: p.name, artist: p.owner,
-          artUri: _autoArtUri(provider, p), playable: false,
-        )).toList();
-
-      case 'favorite-radio-stations':
-        final stations = await provider.getFavoriteRadioStations();
-        return stations.map((s) => MediaItem(
-          id: 'radio|${s.provider}|${s.itemId}',
-          title: s.name,
-          artUri: _autoArtUri(provider, s), playable: true,
-        )).toList();
-
-      case 'favorite-podcasts':
-        // Use cached podcasts filtered by favorite
-        final podcasts = SyncService.instance.cachedPodcasts
-            .where((p) => p.favorite == true).toList();
-        return podcasts.map((p) => MediaItem(
-          id: 'podcast|${p.provider}|${p.itemId}',
-          title: p.name,
-          artUri: _autoArtUri(provider, p), playable: false,
-        )).toList();
-
-      default:
-        return [];
-    }
-  }
-
-  List<MediaItem> _autoBuildMusicCategories() {
-    return [
-      MediaItem(id: _autoIdArtists, title: 'Artists', playable: false,
-          artUri: _iconArtist, extras: _gridHints),
-      MediaItem(id: _autoIdAlbums, title: 'Albums', playable: false,
-          artUri: _iconAlbum, extras: _gridHints),
-      MediaItem(id: _autoIdPlaylists, title: 'Playlists', playable: false,
-          artUri: _iconPlaylist, extras: _gridHints),
-      MediaItem(id: _autoIdFavorites, title: 'Favourites', playable: false,
-          artUri: _iconFavorite),
-    ];
-  }
-
-  List<MediaItem> _autoBuildAudiobookCategories() {
-    return [
-      MediaItem(id: _autoIdAbAuthors, title: 'Authors', playable: false,
-          artUri: _iconArtist),
-      MediaItem(id: _autoIdAbBooks, title: 'Books', playable: false,
-          artUri: _iconBook, extras: _gridHints),
-      MediaItem(id: _autoIdAbSeries, title: 'Series', playable: false,
-          artUri: _iconBook, extras: _gridHints),
-    ];
-  }
-
-  // --- Music builders ---
-
-  List<MediaItem> _autoBuildFavoriteCategories() {
-    return [
-      MediaItem(id: _autoIdFavArtists, title: 'Favourite Artists',
-          playable: false, artUri: _iconArtist),
-      MediaItem(id: _autoIdFavAlbums, title: 'Favourite Albums',
-          playable: false, artUri: _iconAlbum, extras: _gridHints),
-      MediaItem(id: _autoIdFavTracks, title: 'Favourite Tracks',
-          playable: false, artUri: _iconFavorite),
-    ];
-  }
-
-  Future<List<MediaItem>> _autoBuildFavArtists(
-      MusicAssistantProvider provider) async {
-    final artists = await provider.getFavoriteArtists();
-    return artists.map((a) => MediaItem(
-      id: 'artist|${a.name}', title: a.name,
-      artUri: _autoArtUri(provider, a), playable: false,
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildFavAlbums(
-      MusicAssistantProvider provider) async {
-    final albums = await provider.getFavoriteAlbums();
-    return albums.map((a) => MediaItem(
-      id: 'album|${a.provider}|${a.itemId}', title: a.name, artist: a.artistsString,
-      artUri: _autoArtUri(provider, a), playable: false,
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildFavTracks(
-      MusicAssistantProvider provider) async {
-    final tracks = await provider.getFavoriteTracks();
-    _logger.log('AndroidAuto: Fav tracks returned ${tracks.length} tracks');
-    const ctxKey = 'favs||';
-    _cacheTrackList(ctxKey, tracks);
-    return _autoBuildTrackItems(provider, tracks, ctxKey);
-  }
-
-  Future<List<MediaItem>> _autoBuildPlaylistList(MusicAssistantProvider provider) async {
-    var playlists = SyncService.instance.cachedPlaylists;
-    if (playlists.isEmpty) {
-      _logger.log('AndroidAuto: cachedPlaylists empty, loading from cache');
-      await SyncService.instance.loadFromCache();
-      playlists = SyncService.instance.cachedPlaylists;
-    }
-    _logger.log('AndroidAuto: Playlists: ${playlists.length}');
-    return playlists.map((p) => MediaItem(
-      id: 'playlist|${p.provider}|${p.itemId}',
-      title: p.name,
-      artist: p.owner,
-      artUri: _autoArtUri(provider, p),
-      playable: false,
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildPlaylistTracks(
-      MusicAssistantProvider provider, String plProvider, String plItemId) async {
-    final tracks =
-        await provider.getPlaylistTracksWithCache(plProvider, plItemId);
-    final ctxKey = 'plist|$plProvider|$plItemId';
-    _cacheTrackList(ctxKey, tracks);
-    return _autoBuildTrackItems(provider, tracks, ctxKey);
-  }
-
-  Future<List<MediaItem>> _autoBuildArtistList(
-    MusicAssistantProvider provider, {
-    String? alphaFilter,
-  }) async {
-    var artists = SyncService.instance.cachedArtists;
-    if (artists.isEmpty) {
-      _logger.log('AndroidAuto: cachedArtists empty, loading from cache');
-      await SyncService.instance.loadFromCache();
-      artists = SyncService.instance.cachedArtists;
-    }
-    artists.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-
-    if (alphaFilter == null && artists.length > _autoAlphaIndexThreshold) {
-      _logger.log('AndroidAuto: Artists large list (${artists.length}), returning A-Z index');
-      return _autoBuildAlphaIndexItems(
-        items: artists.map((a) => a.name),
-        idPrefix: 'artists_alpha',
-        icon: _iconArtist,
-      );
-    }
-
-    final filtered = alphaFilter == null
-        ? artists
-        : artists.where((a) => _alphaKey(a.name) == alphaFilter).toList();
-
-    _logger.log('AndroidAuto: Artists: ${filtered.length}${alphaFilter != null ? ' (filter $alphaFilter)' : ''}');
-    return filtered.map((a) => MediaItem(
-      id: 'artist|${a.name}',
-      title: a.name,
-      artUri: _autoArtUri(provider, a),
-      playable: false,
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildArtistAlbums(
-      MusicAssistantProvider provider, String artistName) async {
-    var albums = await provider.getArtistAlbumsWithCache(artistName);
-    if (albums.isEmpty) {
-      // Fallback to library if API unavailable
-      albums = provider.getArtistAlbumsFromLibrary(artistName);
-    }
-    _logger.log('AndroidAuto: Artist "$artistName" albums: ${albums.length}');
-    return [
-      MediaItem(
-        id: 'artistradio|$artistName',
-        title: 'Start Radio',
-        artUri: _iconRadio,
-        playable: true,
-      ),
-      ...albums.map((a) => MediaItem(
-        id: 'album|${a.provider}|${a.itemId}',
-        title: a.name,
-        artist: a.artistsString,
-        artUri: _autoArtUri(provider, a),
-        playable: false,
-      )),
-    ];
-  }
-
-  Future<List<MediaItem>> _autoBuildAlbumList(
-    MusicAssistantProvider provider, {
-    String? alphaFilter,
-  }) async {
-    var albums = SyncService.instance.cachedAlbums;
-    if (albums.isEmpty) {
-      _logger.log('AndroidAuto: cachedAlbums empty, loading from cache');
-      await SyncService.instance.loadFromCache();
-      albums = SyncService.instance.cachedAlbums;
-    }
-    albums.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-
-    if (alphaFilter == null && albums.length > _autoAlphaIndexThreshold) {
-      _logger.log('AndroidAuto: Albums large list (${albums.length}), returning A-Z index');
-      return _autoBuildAlphaIndexItems(
-        items: albums.map((a) => a.name),
-        idPrefix: 'albums_alpha',
-        icon: _iconAlbum,
-      );
-    }
-
-    final filtered = alphaFilter == null
-        ? albums
-        : albums.where((a) => _alphaKey(a.name) == alphaFilter).toList();
-
-    _logger.log('AndroidAuto: Albums: ${filtered.length}${alphaFilter != null ? ' (filter $alphaFilter)' : ''}');
-    return filtered.map((a) => MediaItem(
-      id: 'album|${a.provider}|${a.itemId}',
-      title: a.name,
-      artist: a.artistsString,
-      artUri: _autoArtUri(provider, a),
-      playable: false,
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildAlbumTracks(
-      MusicAssistantProvider provider, String alProvider, String alItemId) async {
-    final tracks =
-        await provider.getAlbumTracksWithCache(alProvider, alItemId);
-    _logger.log('AndroidAuto: Album $alProvider/$alItemId tracks: ${tracks.length}');
-    final ctxKey = 'album|$alProvider|$alItemId';
-    _cacheTrackList(ctxKey, tracks);
-    return _autoBuildTrackItems(provider, tracks, ctxKey);
-  }
-
-  List<MediaItem> _autoBuildTrackItems(
-    MusicAssistantProvider provider,
-    List<ma.Track> tracks,
-    String ctxKey, {
-    String? alphaFilter,
-  }) {
-    final sorted = List<ma.Track>.from(tracks)
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-
-    if (alphaFilter == null && sorted.length > _autoAlphaIndexThreshold) {
-      _logger.log('AndroidAuto: Tracks large list (${sorted.length}) for $ctxKey, returning A-Z index');
-      return _autoBuildAlphaIndexItems(
-        items: sorted.map((t) => t.name),
-        idPrefix: 'tracks_alpha|${Uri.encodeComponent(ctxKey)}',
-        icon: _iconMusic,
-      );
-    }
-
-    final filtered = alphaFilter == null
-        ? sorted
-        : sorted.where((t) => _alphaKey(t.name) == alphaFilter).toList();
-    final items = filtered.map((t) => _autoTrackItem(provider, t, ctxKey)).toList();
-    if (items.isNotEmpty) {
-      items.insert(0, _autoStartRadioItem(ctxKey));
-    }
-    return items;
-  }
-
-  List<MediaItem> _autoBuildAlphaIndexItems({
-    required Iterable<String> items,
-    required String idPrefix,
-    required Uri icon,
-  }) {
-    final counts = <String, int>{};
-    for (final value in items) {
-      final key = _alphaKey(value);
-      counts[key] = (counts[key] ?? 0) + 1;
-    }
-
-    final keys = counts.keys.toList()
-      ..sort((a, b) {
-        if (a == '#') return 1;
-        if (b == '#') return -1;
-        return a.compareTo(b);
-      });
-
-    return keys.map((key) => MediaItem(
-      id: '$idPrefix|$key',
-      title: '$key (${counts[key]})',
-      artUri: icon,
-      playable: false,
-    )).toList();
-  }
-
-  String _alphaKey(String input) {
-    final trimmed = input.trimLeft();
-    if (trimmed.isEmpty) return '#';
-
-    var c = trimmed[0].toUpperCase();
-    const fold = {
-      'À': 'A', 'Á': 'A', 'Â': 'A', 'Ã': 'A', 'Ä': 'A', 'Å': 'A',
-      'Ç': 'C',
-      'È': 'E', 'É': 'E', 'Ê': 'E', 'Ë': 'E',
-      'Ì': 'I', 'Í': 'I', 'Î': 'I', 'Ï': 'I',
-      'Ñ': 'N',
-      'Ò': 'O', 'Ó': 'O', 'Ô': 'O', 'Õ': 'O', 'Ö': 'O',
-      'Ù': 'U', 'Ú': 'U', 'Û': 'U', 'Ü': 'U',
-      'Ý': 'Y',
-    };
-    c = fold[c] ?? c;
-
-    if (RegExp(r'^[A-Z]$').hasMatch(c)) return c;
-    return '#';
-  }
-
-  // --- Audiobook builders ---
-
-  List<MediaItem> _autoBuildAudiobookAuthorList(
-      MusicAssistantProvider provider) {
-    final books = SyncService.instance.cachedAudiobooks;
-    final seen = <String>{};
-    final items = <MediaItem>[];
-    for (final b in books) {
-      final author = b.authorsString;
-      if (seen.add(author)) {
-        items.add(MediaItem(
-          id: 'ab_author|$author',
-          title: author,
-          artUri: _autoArtUri(provider, b),
-          playable: false,
-        ));
-      }
-    }
-    _logger.log('AndroidAuto: Audiobook authors: ${items.length}');
-    return items;
-  }
-
-  List<MediaItem> _autoBuildAuthorAudiobooks(
-      MusicAssistantProvider provider, String authorName) {
-    final books = SyncService.instance.cachedAudiobooks
-        .where((b) => b.authorsString == authorName)
-        .toList();
-    return books.map((b) => MediaItem(
-      id: 'audiobook|${b.provider}|${b.itemId}',
-      title: b.name,
-      artist: b.authorsString,
-      artUri: _autoArtUri(provider, b),
-      playable: true,
-      extras: _audiobookExtras(b),
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildAudiobookList(MusicAssistantProvider provider) async {
-    var books = SyncService.instance.cachedAudiobooks;
-    if (books.isEmpty) {
-      // Sync cache may not be loaded yet — wait for it
-      _logger.log('AndroidAuto: cachedAudiobooks empty, loading from cache');
-      await SyncService.instance.loadFromCache();
-      books = SyncService.instance.cachedAudiobooks;
-    }
-    _logger.log('AndroidAuto: Books: ${books.length}');
-    // Sort alphabetically and cap to avoid overwhelming Android Auto
-    books.sort((a, b) => a.name.compareTo(b.name));
-    return books.take(500).map((b) => MediaItem(
-      id: 'audiobook|${b.provider}|${b.itemId}',
-      title: b.name,
-      artist: b.authorsString,
-      artUri: _autoArtUri(provider, b),
-      playable: true,
-      extras: _audiobookExtras(b),
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildAudiobookSeriesList(
-      MusicAssistantProvider provider) async {
-    final series = await provider.getDiscoverSeriesWithCache();
-    _logger.log('AndroidAuto: Audiobook series: ${series.length}');
-    final items = <MediaItem>[];
-    for (final s in series) {
-      // Use first book's artwork instead of series mosaic thumbnail
-      Uri? artUri;
-      var cachedBooks = provider.getCachedSeriesAudiobooks(s.id);
-      if (cachedBooks == null || cachedBooks.isEmpty) {
-        // Fetch books for this series (result is cached for future use)
-        try {
-          cachedBooks = await provider.getSeriesAudiobooksWithCache(s.id);
-        } catch (_) {}
-      }
-      if (cachedBooks != null && cachedBooks.isNotEmpty) {
-        artUri = _autoArtUri(provider, cachedBooks.first);
-      }
-      items.add(MediaItem(
-        id: 'ab_series|${s.id}',
-        title: s.name,
-        artUri: artUri,
-        playable: false,
-      ));
-    }
-    return items;
-  }
-
-  Future<List<MediaItem>> _autoBuildSeriesAudiobooks(
-      MusicAssistantProvider provider, String seriesPath) async {
-    final books = await provider.getSeriesAudiobooksWithCache(seriesPath);
-    return books.map((b) => MediaItem(
-      id: 'audiobook|${b.provider}|${b.itemId}',
-      title: b.name,
-      artist: b.authorsString,
-      artUri: _autoArtUri(provider, b),
-      playable: true,
-      extras: _audiobookExtras(b),
-    )).toList();
-  }
-
-  // --- Podcast builders ---
-
-  List<MediaItem> _autoBuildPodcastList(MusicAssistantProvider provider) {
-    final podcasts = SyncService.instance.cachedPodcasts;
-    _logger.log('AndroidAuto: Podcasts: ${podcasts.length}');
-    return podcasts.map((p) => MediaItem(
-      id: 'podcast|${p.provider}|${p.itemId}',
-      title: p.name,
-      artUri: _autoArtUri(provider, p),
-      playable: false,
-    )).toList();
-  }
-
-  Future<List<MediaItem>> _autoBuildPodcastEpisodes(
-      MusicAssistantProvider provider, String podProvider, String podItemId) async {
-    final episodes = await provider.getPodcastEpisodesWithCache(
-      podItemId,
-      provider: podProvider,
-    );
-    // Look up podcast name to show as artist for each episode
-    final podcast = SyncService.instance.cachedPodcasts
-        .where((p) => p.itemId == podItemId && p.provider == podProvider)
-        .firstOrNull;
-    // Encode podcast context in episode ID: podcast_ep|epProvider|epId|podProvider|podId
-    return episodes.map((e) => MediaItem(
-      id: 'podcast_ep|${e.provider}|${e.itemId}|$podProvider|$podItemId',
-      title: e.name,
-      artist: podcast?.name,
-      duration: e.duration,
-      artUri: _autoArtUri(provider, e),
-      playable: true,
-    )).toList();
-  }
-
-  // --- Radio builder ---
-
-  Future<List<MediaItem>> _autoBuildRadioList(MusicAssistantProvider provider) async {
-    // Radio stations are lazily loaded — trigger load if empty
-    if (provider.radioStations.isEmpty) {
-      _logger.log('AndroidAuto: Radio empty, loading stations');
-      await provider.loadRadioStations();
-    }
-    final stations = provider.radioStations;
-    _logger.log('AndroidAuto: Radio stations: ${stations.length}');
-    return stations.map((s) => MediaItem(
-      id: 'radio|${s.provider}|${s.itemId}',
-      title: s.name,
-      artUri: _autoArtUri(provider, s),
-      playable: true,
-    )).toList();
-  }
-
-  // --- Helpers ---
-
-  Map<String, dynamic>? _audiobookExtras(ma.Audiobook book) {
-    if (book.progress <= 0 && book.fullyPlayed != true) return null;
-    return {
-      'android.media.extra.PLAYBACK_STATUS': book.fullyPlayed == true ? 2 : 1,
-      'android.media.extra.PLAYBACK_STATUS_COMPLETION_PERCENTAGE': book.progress,
-    };
-  }
-
-  MediaItem _autoStartRadioItem(String ctxKey) {
-    return MediaItem(
-      id: 'smartshuffle|$ctxKey',
-      title: 'Start Radio',
-      artUri: _iconStartRadio,
-      playable: true,
-    );
-  }
-
-  MediaItem _autoTrackItem(
-      MusicAssistantProvider provider, ma.Track t, String ctxKey) {
-    final firstArtist = t.artists?.isNotEmpty == true ? t.artists!.first.name : null;
-    return MediaItem(
-      id: 'track|${t.provider}|${t.itemId}|$ctxKey',
-      title: t.name,
-      artist: t.artistsString,
-      album: t.album?.name,
-      duration: t.duration,
-      artUri: _autoArtUri(provider, t),
-      playable: true,
-      extras: firstArtist != null ? {
-        'android.media.metadata.SUBTITLE_LINK_MEDIA_ID': 'artist|$firstArtist',
-      } : null,
-    );
-  }
-
-  static const _artworkAuthority = 'com.collotsspot.ensemble.artwork';
-
-  Uri? _autoArtUri(MusicAssistantProvider provider, ma.MediaItem item) {
-    final url = provider.getImageUrl(item, size: 256);
-    if (url == null) return null;
-    return _contentUriForArtwork(url);
-  }
-
-  static Uri? _contentUriForArtwork(String httpUrl) {
-    final encoded = base64Url.encode(utf8.encode(httpUrl));
-    return Uri.tryParse('content://$_artworkAuthority/$encoded');
   }
 
   // ---------------------------------------------------------------------------
