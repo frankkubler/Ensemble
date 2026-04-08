@@ -2001,7 +2001,7 @@ class MusicAssistantProvider with ChangeNotifier {
     audioHandler.onPlay = () {
       _logger.log('🎵 Notification: Play pressed');
       if (_selectedPlayer != null) {
-        resumePlayer(_selectedPlayer!.playerId);
+        resumePlayer(_selectedPlayer!.playerId, fromUserGesture: true);
         unawaited(refreshPlayers());
       }
     };
@@ -4392,9 +4392,24 @@ class MusicAssistantProvider with ChangeNotifier {
         // PRIORITY 0: Android Auto session active — always select the phone/builtin player.
         // This overrides any other selection logic to ensure that repeated calls to
         // _loadAndSelectPlayers during an AA session never re-select SOUNDBAR_BT.
-        // Exception: if the user has explicitly selected/resumed another player from
+        // Exception 1: if the user has explicitly selected/resumed another player from
         // the UI while AA is active (_aaUserOverride = true), respect their choice.
+        // Exception 2: if the current selection is already a non-builtin available player,
+        // the user has made a deliberate choice — do not override regardless of the
+        // code path that triggered this refresh (notification, mini-player, etc.).
         if (_aaSessionActive && !_aaUserOverride && builtinPlayerId != null) {
+          final currentIsBuiltin = _selectedPlayer != null &&
+              _matchesBuiltinId(_selectedPlayer!.playerId, builtinPlayerId);
+          final currentIsAvailable = _selectedPlayer != null &&
+              _availablePlayers.any((p) => p.playerId == _selectedPlayer!.playerId && p.available);
+          if (!currentIsBuiltin && currentIsAvailable && _selectedPlayer != null) {
+            // User has selected a non-builtin player that is online — respect their choice
+            // and implicitly set the user-override flag to stabilise future refreshes.
+            _aaUserOverride = true;
+            _logger.log('🚗 AA session active: user has non-builtin player "${_selectedPlayer!.name}" — respecting selection');
+            unawaited(_preloadAdjacentPlayers(preloadAll: true));
+            return;
+          }
           final resolvedBuiltinId = builtinPlayerId;
           final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
             (p) => _matchesBuiltinId(p!.playerId, resolvedBuiltinId),

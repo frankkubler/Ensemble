@@ -418,7 +418,7 @@ class _PlayerSelectorSheetState extends State<_PlayerSelectorSheet> {
                                               if (isPlaying) {
                                                 maProvider.pausePlayer(player.playerId);
                                               } else {
-                                                maProvider.resumePlayer(player.playerId);
+                                                maProvider.resumePlayer(player.playerId, fromUserGesture: true);
                                               }
                                             },
                                           ),
