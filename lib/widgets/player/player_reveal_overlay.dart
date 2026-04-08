@@ -472,7 +472,7 @@ class PlayerRevealOverlayState extends State<PlayerRevealOverlay>
                                         if (widget.onPlayerSelected != null) {
                                           widget.onPlayerSelected!(data.player);
                                         } else {
-                                          maProvider.selectPlayer(data.player);
+                                          maProvider.selectPlayer(data.player, fromUserGesture: true);
                                         }
                                         dismiss();
                                       },
@@ -484,7 +484,7 @@ class PlayerRevealOverlayState extends State<PlayerRevealOverlay>
                                         if (data.isPlaying) {
                                           maProvider.pausePlayer(data.player.playerId);
                                         } else {
-                                          maProvider.resumePlayer(data.player.playerId);
+                                          maProvider.resumePlayer(data.player.playerId, fromUserGesture: true);
                                         }
                                       },
                                       onSkipNext: () => maProvider.nextTrack(data.player.playerId),
@@ -529,7 +529,7 @@ class PlayerRevealOverlayState extends State<PlayerRevealOverlay>
                                   if (widget.onPlayerSelected != null) {
                                     widget.onPlayerSelected!(data.player);
                                   } else {
-                                    maProvider.selectPlayer(data.player);
+                                    maProvider.selectPlayer(data.player, fromUserGesture: true);
                                   }
                                   dismiss();
                                 },
@@ -541,7 +541,7 @@ class PlayerRevealOverlayState extends State<PlayerRevealOverlay>
                                   if (data.isPlaying) {
                                     maProvider.pausePlayer(data.player.playerId);
                                   } else {
-                                    maProvider.resumePlayer(data.player.playerId);
+                                    maProvider.resumePlayer(data.player.playerId, fromUserGesture: true);
                                   }
                                 },
                                 onSkipNext: () => maProvider.nextTrack(data.player.playerId),

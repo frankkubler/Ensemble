@@ -157,6 +157,11 @@ class MusicAssistantProvider with ChangeNotifier {
   // of what was last selected — prevents SOUNDBAR_BT from being re-selected on
   // each checkAndReconnect loop during an active AA session.
   bool _aaSessionActive = false;
+  // When true, the user has explicitly selected or resumed a non-builtin player
+  // from the UI (e.g. PlayerRevealOverlay) during an active AA session. This
+  // suppresses the Priority-0 AA override so the user's intent is respected.
+  // Cleared on AA connect/disconnect.
+  bool _aaUserOverride = false;
   // Player that was active before AA connected (to pause it on switch).
   String? _preAASelectedPlayerId;
 
@@ -2017,6 +2022,7 @@ class MusicAssistantProvider with ChangeNotifier {
       _suppressSendspinAutoResume = false;
       _pendingAASwitch = false;
       _aaSessionActive = true;
+      _aaUserOverride = false; // Clear any previous user override when AA reconnects
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId == null) return;
 
@@ -2061,6 +2067,7 @@ class MusicAssistantProvider with ChangeNotifier {
       _suppressSendspinAutoResume = true;
       _pendingAASwitch = false;
       _aaSessionActive = false;
+      _aaUserOverride = false; // Clear user override when AA disconnects
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
       if (builtinPlayerId != null) {
         _logger.log('🎵 AA disconnected: snapshotting state then pausing builtin player');
@@ -4385,7 +4392,9 @@ class MusicAssistantProvider with ChangeNotifier {
         // PRIORITY 0: Android Auto session active — always select the phone/builtin player.
         // This overrides any other selection logic to ensure that repeated calls to
         // _loadAndSelectPlayers during an AA session never re-select SOUNDBAR_BT.
-        if (_aaSessionActive && builtinPlayerId != null) {
+        // Exception: if the user has explicitly selected/resumed another player from
+        // the UI while AA is active (_aaUserOverride = true), respect their choice.
+        if (_aaSessionActive && !_aaUserOverride && builtinPlayerId != null) {
           final resolvedBuiltinId = builtinPlayerId;
           final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
             (p) => _matchesBuiltinId(p!.playerId, resolvedBuiltinId),
@@ -4568,7 +4577,7 @@ class MusicAssistantProvider with ChangeNotifier {
     }
   }
 
-  void selectPlayer(Player player, {bool skipNotify = false}) async {
+  void selectPlayer(Player player, {bool skipNotify = false, bool fromUserGesture = false}) async {
     // Reentrancy guard - prevent concurrent selection which can cause race conditions
     if (_selectPlayerInProgress) {
       _logger.log('⚠️ selectPlayer already in progress, skipping for ${player.name}');
@@ -4577,6 +4586,13 @@ class MusicAssistantProvider with ChangeNotifier {
     _selectPlayerInProgress = true;
 
     try {
+      // If the user explicitly selected a player from the UI during an active AA
+      // session, suppress the Priority-0 AA override so the selection sticks.
+      if (fromUserGesture && _aaSessionActive) {
+        _aaUserOverride = true;
+        _logger.log('👤 User override: selectPlayer(${player.name}) during AA session');
+      }
+
       _selectedPlayer = player;
 
     // Cache for instant display on app resume
@@ -6156,7 +6172,13 @@ class MusicAssistantProvider with ChangeNotifier {
     }
   }
 
-  Future<void> resumePlayer(String playerId) async {
+  Future<void> resumePlayer(String playerId, {bool fromUserGesture = false}) async {
+    // If the user explicitly resumed a player from the overlay during an active
+    // AA session, suppress the AA Priority-0 override so the selection sticks.
+    if (fromUserGesture && _aaSessionActive) {
+      _aaUserOverride = true;
+      _logger.log('👤 User override: resumePlayer($playerId) during AA session');
+    }
     // Only lift the Sendspin auto-resume suppression when the user explicitly
     // resumes the built-in/Sendspin player itself. Resetting this flag for any
     // other player would allow the phone speaker to unexpectedly start audio if
