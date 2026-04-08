@@ -2847,6 +2847,20 @@ class MusicAssistantProvider with ChangeNotifier {
       final playerName = event['name'] as String?;
       _logger.log('🆕 Player added: $playerName ($playerId)');
 
+      // Only trigger a full reload if the player is genuinely new (not already in
+      // our list). Repeated player_added events for known players (e.g. Sendspin
+      // re-registration after a resume) would otherwise cause _loadAndSelectPlayers
+      // to run with forceRefresh=true, which can momentarily lose the current
+      // non-builtin selection if the fresh API snapshot catches the player as
+      // available:false during its transition.
+      final alreadyKnown = playerId != null &&
+          _availablePlayers.any((p) => p.playerId == playerId);
+      if (alreadyKnown) {
+        _logger.log('🆕 Player $playerId already known — skipping full reload');
+        notifyListeners();
+        return;
+      }
+
       // Refresh the player list to include the new player
       await _loadAndSelectPlayers(forceRefresh: true);
       notifyListeners();
@@ -4404,6 +4418,11 @@ class MusicAssistantProvider with ChangeNotifier {
         // 4. First launch (no history): select local player
         // 5. Local player unavailable: select first available
 
+        // When true, the current selection is temporarily unavailable but the
+        // device still exists on the server (transitional state). Skip all
+        // priority fallbacks to avoid reverting to the built-in player.
+        bool keepSelectionTransient = false;
+
         // Keep currently selected player if still available
         if (_selectedPlayer != null && !coldStart) {
           // Check if selected player is still available - also check translated Cast/Sendspin IDs
@@ -4435,15 +4454,32 @@ class MusicAssistantProvider with ChangeNotifier {
               _logger.log('✓ Keeping current selection: ${currentPlayer.name}');
             }
           } else {
-            // Selected player went offline - will fall through to local player
-            _logger.log('⚠️ Selected player ${_selectedPlayer!.name} no longer available');
+            // Before falling back to the built-in, check whether the player still
+            // exists in the raw API response (allPlayers) even if it is currently
+            // marked as available:false.  A fresh API snapshot can catch a device
+            // mid-transition (e.g. just powered on, Sendspin re-registering) and
+            // return available:false for a brief moment.  In that case the device
+            // is not truly gone — keep the current selection so it recovers on the
+            // next poll instead of instantly reverting to the built-in player.
+            final existsInRaw = allPlayers.any(
+              (p) => p.playerId == selectedId ||
+                     (translatedId != null && p.playerId == translatedId) ||
+                     (reverseTranslatedId != null && p.playerId == reverseTranslatedId),
+            );
+            if (existsInRaw) {
+              _logger.log('⏳ Selected player ${_selectedPlayer!.name} temporarily unavailable (still in raw list) — keeping selection');
+              keepSelectionTransient = true;
+            } else {
+              // Player truly gone from server — fall through to local player
+              _logger.log('⚠️ Selected player ${_selectedPlayer!.name} no longer available');
+            }
           }
         }
 
         // Priority 1: Restore last selected player (on coldStart)
         // Require powered=true so a player that was manually switched off is
         // not silently re-selected on reconnect.
-        if (playerToSelect == null && coldStart && lastSelectedPlayerId != null) {
+        if (!keepSelectionTransient && playerToSelect == null && coldStart && lastSelectedPlayerId != null) {
           playerToSelect = _availablePlayers.cast<Player?>().firstWhere(
             (p) => p!.playerId == lastSelectedPlayerId && p.available && p.powered,
             orElse: () => null,
@@ -4457,7 +4493,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
         // Priority 2: Local player (default fallback)
         // Try available first, then accept unavailable (Sendspin may still be registering)
-        if (playerToSelect == null && builtinPlayerId != null) {
+        if (!keepSelectionTransient && playerToSelect == null && builtinPlayerId != null) {
           playerToSelect = _availablePlayers.cast<Player?>().firstWhere(
             (p) => _matchesBuiltinId(p!.playerId, builtinPlayerId!) && p.available,
             orElse: () => null,
@@ -4480,7 +4516,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
         // Priority 3: First available player (only if no local player configured)
         // Don't fall back to another player if builtin player is configured but not yet registered
-        if (playerToSelect == null && builtinPlayerId == null) {
+        if (!keepSelectionTransient && playerToSelect == null && builtinPlayerId == null) {
           playerToSelect = _availablePlayers.firstWhere(
             (p) => p.available,
             orElse: () => _availablePlayers.first,
@@ -4488,7 +4524,11 @@ class MusicAssistantProvider with ChangeNotifier {
           _logger.log('🔄 Fallback to first available player: ${playerToSelect.name}');
         }
 
-        if (playerToSelect != null) {
+        if (keepSelectionTransient) {
+          // Current selection is temporarily unavailable but the device still exists
+          // on the server — do not call selectPlayer to avoid state churn.
+          _logger.log('⏳ Keeping current selection during transient unavailability: ${_selectedPlayer?.name}');
+        } else if (playerToSelect != null) {
           selectPlayer(playerToSelect);
         } else {
           // Builtin player not yet registered — keep current selection if any,
@@ -6117,8 +6157,16 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> resumePlayer(String playerId) async {
-    // User explicitly asked to play — allow Sendspin stream/start again
-    _suppressSendspinAutoResume = false;
+    // Only lift the Sendspin auto-resume suppression when the user explicitly
+    // resumes the built-in/Sendspin player itself. Resetting this flag for any
+    // other player would allow the phone speaker to unexpectedly start audio if
+    // the MA server still has a pending Sendspin stream queued.
+    final builtinIdForResume = await SettingsService.getBuiltinPlayerId();
+    if (builtinIdForResume != null &&
+        (playerId == builtinIdForResume ||
+         _matchesBuiltinId(playerId, builtinIdForResume))) {
+      _suppressSendspinAutoResume = false;
+    }
     try {
       // For resume, we let MA handle it since it needs to restart the stream
       // The stream_start event will trigger local playback

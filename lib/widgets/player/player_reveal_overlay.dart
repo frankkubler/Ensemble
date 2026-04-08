@@ -107,11 +107,15 @@ class PlayerRevealOverlayState extends State<PlayerRevealOverlay>
       if (mounted) _preloadColorsForPlayers();
     });
 
-    // Auto-refresh player data
+    // Auto-refresh player track data (state + artwork) without re-evaluating
+    // player selection. Using refreshPlayers() would call _loadAndSelectPlayers
+    // with forceRefresh:true every 5 s, which can silently revert the selected
+    // player to the built-in whenever the API snapshot catches another player as
+    // temporarily unavailable. preloadAllPlayerTracks() + color extraction is
+    // sufficient to keep the overlay cards up-to-date.
     _refreshTimer = Timer.periodic(Timings.playerPollingInterval, (_) {
       if (mounted) {
         final provider = context.read<MusicAssistantProvider>();
-        provider.refreshPlayers();
         provider.preloadAllPlayerTracks().then((_) {
           if (mounted) _preloadColorsForPlayers();
         });
