@@ -50,6 +50,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   // Android Auto: track queue cache — maps context key to ordered track list.
   // Populated during getChildren so playFromMediaId can queue the full album/playlist.
   static const _maxTrackCacheEntries = 50;
+  static const _maxChildSubjectEntries = 100;
   final Map<String, List<ma.Track>> _autoTrackCache = {};
 
   void _cacheTrackList(String key, List<ma.Track> tracks) {
@@ -70,6 +71,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   // Track whether music was actually playing before an interruption
   bool _wasPlayingBeforeInterruption = false;
+
+  // Cancellable timer for deferred queue refresh after radio/podcast start
+  Timer? _queueRefreshTimer;
 
   // Timestamp of last AA disconnect — used to suppress stream/start race condition
   DateTime? aaDisconnectedAt;
@@ -160,6 +164,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _aaChannel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'onAndroidAutoConnected':
+          if (_isAndroidAutoConnected) break; // already handled via getChildren/playFromMediaId
           _logger.log('AndroidAuto: car mode connected (broadcast)');
           _isAndroidAutoConnected = true;
           _aaChannel.invokeMethod('notifyAAConnected', null);
@@ -245,9 +250,13 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   @override
   Future<void> stop() async {
-    // Stop action is used for switching players (both local and remote modes)
-    onSwitchPlayer?.call();
-    // Note: We don't actually stop playback - this button is repurposed for player switching
+    if (onSwitchPlayer != null) {
+      // Notification button repurposed for player switching
+      onSwitchPlayer!.call();
+    } else {
+      // Genuine system stop (phone call, BT command, etc.) — fully stop service
+      await stopService();
+    }
   }
 
   /// Fully stop the foreground service and release resources
@@ -321,16 +330,19 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               }
             }
             _logger.log('AndroidAuto: toggleFavorite: removing, libraryItemId=$libraryItemId');
-            if (libraryItemId != null) {
-              await provider.removeFromFavorites(
-                mediaType: 'track', libraryItemId: libraryItemId);
+            if (libraryItemId == null) {
+              _logger.log('AndroidAuto: toggleFavorite: no library mapping, cannot remove');
+              return;
             }
+            await provider.removeFromFavorites(
+              mediaType: 'track', libraryItemId: libraryItemId);
+            _isFavorite = false;
           } else {
             _logger.log('AndroidAuto: toggleFavorite: adding');
             await provider.addToFavorites(
               mediaType: 'track', itemId: track.itemId, provider: track.provider);
+            _isFavorite = true;
           }
-          _isFavorite = !_isFavorite;
         case 'startRadio':
           final track = provider.currentTrack;
           if (track == null) {
@@ -416,7 +428,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   /// Set remote playback state (for controlling MA players without local playback)
   /// This shows the notification and responds to media controls without playing audio locally.
-  void setRemotePlaybackState({
+  Future<void> setRemotePlaybackState({
     required MediaItem item,
     required bool playing,
     Duration position = Duration.zero,
@@ -434,10 +446,12 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     // Remote MA players manage their own audio — claiming focus on the phone
     // would pause them when another app (e.g. YouTube) plays.
     final builtinId = await SettingsService.getBuiltinPlayerId();
+    if (!_isRemoteMode) return; // guard: clearRemotePlaybackState() called while awaiting
     final selectedId = _autoProvider?.selectedPlayer?.playerId;
     _isBuiltinPlayerActive = builtinId != null && selectedId == builtinId;
     if (playing && _isBuiltinPlayerActive) {
       final session = await AudioSession.instance;
+      if (!_isRemoteMode) return; // guard: state may have changed
       await session.setActive(true);
     }
     // Only update mediaItem when the track actually changes to avoid
@@ -469,7 +483,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   }
 
   /// Clear remote playback state and hide notification
-  void clearRemotePlaybackState() async {
+  Future<void> clearRemotePlaybackState() async {
     _isRemoteMode = false;
     _currentMediaItem = null;
 
@@ -492,7 +506,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   /// Update notification for local mode (builtin player) without switching to remote mode
   /// This allows the notification to show the correct player/track info while keeping
   /// pause working for local audio playback.
-  void updateLocalModeNotification({
+  Future<void> updateLocalModeNotification({
     required MediaItem item,
     required bool playing,
     Duration? duration,
@@ -838,7 +852,13 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   @override
   ValueStream<Map<String, dynamic>> subscribeToChildren(String parentMediaId) {
-    _autoChildrenSubjects[parentMediaId] ??= BehaviorSubject.seeded({});
+    if (!_autoChildrenSubjects.containsKey(parentMediaId)) {
+      if (_autoChildrenSubjects.length >= _maxChildSubjectEntries) {
+        final oldest = _autoChildrenSubjects.keys.first;
+        _autoChildrenSubjects.remove(oldest)?.close();
+      }
+      _autoChildrenSubjects[parentMediaId] = BehaviorSubject.seeded({});
+    }
     return _autoChildrenSubjects[parentMediaId]!.stream;
   }
 
@@ -1130,7 +1150,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       final artists = (results['artists'] ?? []).whereType<ma.Artist>().take(5).toList();
       final albums = (results['albums'] ?? []).whereType<ma.Album>().take(5).toList();
       final tracks = (results['tracks'] ?? []).whereType<ma.Track>().toList();
-      const ctxKey = 'search||';
+      final ctxKey = 'search|${Uri.encodeComponent(query)}|';
       _cacheTrackList(ctxKey, tracks);
 
       final items = <MediaItem>[];
@@ -1250,7 +1270,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   /// Fetch the server queue after a delay (e.g. after starting radio/podcast) and update AA queue.
   void _refreshQueueAfterDelay(MusicAssistantProvider provider, String playerId) {
-    Future.delayed(const Duration(seconds: 2), () async {
+    _queueRefreshTimer?.cancel();
+    _queueRefreshTimer = Timer(const Duration(seconds: 2), () async {
       try {
         final q = await provider.getQueue(playerId);
         if (q?.items == null || q!.items.isEmpty) return;
@@ -1924,13 +1945,14 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   static Uri? _contentUriForArtwork(String httpUrl) {
     final encoded = base64Url.encode(utf8.encode(httpUrl));
-    return Uri.parse('content://$_artworkAuthority/$encoded');
+    return Uri.tryParse('content://$_artworkAuthority/$encoded');
   }
 
   // ---------------------------------------------------------------------------
 
   /// Dispose of resources and cancel all subscriptions
   Future<void> dispose() async {
+    _queueRefreshTimer?.cancel();
     await _interruptionSubscription?.cancel();
     await _becomingNoisySubscription?.cancel();
     await _playbackEventSubscription?.cancel();
