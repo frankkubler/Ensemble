@@ -6138,6 +6138,15 @@ class MusicAssistantProvider with ChangeNotifier {
         _logger.log('❌ Could not restore queue from cache');
       }
 
+      // 999 "play needs to be implemented" means this player type does not support
+      // the player_queues/play command (e.g. some Bluetooth players). Treat it as
+      // non-fatal so it does not surface as an unhandled ZoneError.
+      if (errorStr.contains('play needs to be implemented') ||
+          errorStr.contains('not implemented')) {
+        _logger.log('⚠️ Player does not support play command (999): $e');
+        return;
+      }
+
       ErrorHandler.logError('Resume player', e);
       rethrow;
     }

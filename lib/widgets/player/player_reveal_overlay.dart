@@ -112,13 +112,16 @@ class PlayerRevealOverlayState extends State<PlayerRevealOverlay>
       if (mounted) {
         final provider = context.read<MusicAssistantProvider>();
         provider.refreshPlayers();
-        provider.preloadAllPlayerTracks().then((_) => _preloadColorsForPlayers());
+        provider.preloadAllPlayerTracks().then((_) {
+          if (mounted) _preloadColorsForPlayers();
+        });
       }
     });
   }
 
   /// Extract accent colors from album art for each player
   Future<void> _preloadColorsForPlayers() async {
+    if (!mounted) return;
     final maProvider = context.read<MusicAssistantProvider>();
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
