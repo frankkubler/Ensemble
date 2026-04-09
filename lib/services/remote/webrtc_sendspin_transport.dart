@@ -30,7 +30,13 @@ class WebRtcSendspinTransport implements SendspinTransport {
       WebRtcSessionChannel.sendspin,
     );
     _session = session;
-    await session.ensureConnected();
+    try {
+      await session.ensureConnected();
+    } catch (_) {
+      _session = null;
+      await session.release(WebRtcSessionChannel.sendspin);
+      rethrow;
+    }
   }
 
   @override

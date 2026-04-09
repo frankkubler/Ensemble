@@ -219,7 +219,11 @@ class SettingsService {
   static Future<void> setWebRtcRemoteId(String? remoteId) async {
     await _setString(
       _keyWebRtcRemoteId,
-      remoteId?.trim().toUpperCase(),
+      remoteId
+          ?.replaceAll('-', '')
+          .replaceAll(' ', '')
+          .trim()
+          .toUpperCase(),
       removeIfEmpty: true,
     );
   }

@@ -12,7 +12,11 @@ class WebRtcSharedSessionRegistry {
   static final Map<String, WebRtcSharedSession> _sessions = {};
 
   static WebRtcSharedSession acquire(String remoteId, WebRtcSessionChannel channel) {
-    final normalizedRemoteId = remoteId.trim().toUpperCase();
+    final normalizedRemoteId = remoteId
+        .replaceAll('-', '')
+        .replaceAll(' ', '')
+        .trim()
+        .toUpperCase();
     final session = _sessions.putIfAbsent(
       normalizedRemoteId,
       () => WebRtcSharedSession._(

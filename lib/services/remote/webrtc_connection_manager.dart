@@ -41,6 +41,12 @@ class WebRtcConnectionManager {
   WebRtcConnectionState _state = WebRtcConnectionState.idle;
   final Set<String> _openChannels = <String>{};
 
+  String get _normalizedRemoteId => remoteId
+      .replaceAll('-', '')
+      .replaceAll(' ', '')
+      .trim()
+      .toUpperCase();
+
   Stream<WebRtcConnectionState> get connectionState => _stateController.stream;
   Stream<dynamic> get messages => _messageController.stream;
   Stream<dynamic> get sendspinMessages => _sendspinMessageController.stream;
@@ -64,7 +70,7 @@ class WebRtcConnectionManager {
     await _signalingSubscription?.cancel();
     _signalingSubscription =
         _signalingClient.messages.listen(_handleSignalingMessage);
-    await _signalingClient.sendConnectRequest(remoteId);
+    await _signalingClient.sendConnectRequest(_normalizedRemoteId);
 
     await _connectCompleter!.future.timeout(
       const Duration(seconds: 30),
@@ -144,6 +150,7 @@ class WebRtcConnectionManager {
       unawaited(
         _signalingClient.sendMessage({
           'type': 'ice-candidate',
+          'remoteId': _normalizedRemoteId,
           'sessionId': sessionId,
           'data': {
             'candidate': candidate.candidate,
@@ -195,6 +202,7 @@ class WebRtcConnectionManager {
 
     await _signalingClient.sendMessage({
       'type': 'offer',
+      'remoteId': _normalizedRemoteId,
       'sessionId': _sessionId,
       'data': {
         'type': offer.type,

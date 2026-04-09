@@ -28,7 +28,13 @@ class WebRtcApiTransport implements MAConnectionTransport {
       WebRtcSessionChannel.api,
     );
     _session = session;
-    await session.ensureConnected();
+    try {
+      await session.ensureConnected();
+    } catch (_) {
+      _session = null;
+      await session.release(WebRtcSessionChannel.api);
+      rethrow;
+    }
   }
 
   @override

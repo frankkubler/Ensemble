@@ -97,9 +97,21 @@ class ConnectionProvider with ChangeNotifier {
   }
 
   Future<void> setWebRtcRemoteId(String? remoteId) async {
-    _webRtcRemoteId = remoteId?.trim().toUpperCase();
+    _webRtcRemoteId = _normalizeWebRtcRemoteId(remoteId);
     await SettingsService.setWebRtcRemoteId(_webRtcRemoteId);
     notifyListeners();
+  }
+
+  String? _normalizeWebRtcRemoteId(String? remoteId) {
+    final normalized = remoteId
+        ?.replaceAll('-', '')
+        .replaceAll(' ', '')
+        .trim()
+        .toUpperCase();
+    if (normalized == null || normalized.isEmpty) {
+      return null;
+    }
+    return normalized;
   }
 
   /// Pre-load a stored token into the auth manager before the first [connect()].
