@@ -5,6 +5,7 @@ import 'debug_logger.dart';
 import 'settings_service.dart';
 import 'device_id_service.dart';
 import 'remote/sendspin_transport.dart';
+import 'remote/http_endpoint_resolver.dart';
 import 'remote/websocket_sendspin_transport.dart';
 
 /// Connection state for Sendspin player
@@ -160,8 +161,16 @@ class SendspinService {
       // Use proxy auth for MA 2.7.1+ - the proxy requires authentication before hello
       if (_isHttpsServer()) {
         final externalUrl = _buildExternalSendspinUrl();
-        _logger.log('Sendspin: Trying external URL: $externalUrl');
-        connected = await _tryConnect(externalUrl, timeout: const Duration(seconds: 5), useProxyAuth: true);
+        if (externalUrl.isNotEmpty) {
+          _logger.log('Sendspin: Trying external URL: $externalUrl');
+          connected = await _tryConnect(
+            externalUrl,
+            timeout: const Duration(seconds: 5),
+            useProxyAuth: true,
+          );
+        } else {
+          _logger.log('Sendspin: No resolvable external proxy URL available');
+        }
       }
 
       // Note: Local network connections (ws://ip:8927/sendspin) are handled
@@ -706,28 +715,7 @@ class SendspinService {
 
   /// Build external Sendspin WebSocket URL from server URL
   String _buildExternalSendspinUrl() {
-    var url = serverUrl;
-
-    // Convert HTTP(S) to WS(S)
-    if (url.startsWith('https://')) {
-      url = 'wss://${url.substring(8)}';
-    } else if (url.startsWith('http://')) {
-      url = 'ws://${url.substring(7)}';
-    } else if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-      url = 'wss://$url';
-    }
-
-    // Remove trailing slash and add /sendspin path
-    url = url.replaceAll(RegExp(r'/+$'), '');
-
-    // Remove any existing path and add /sendspin
-    final uri = Uri.parse(url);
-    return Uri(
-      scheme: uri.scheme,
-      host: uri.host,
-      port: uri.hasPort ? uri.port : null,
-      path: '/sendspin',
-    ).toString();
+    return HttpEndpointResolver(serverUrl: serverUrl).buildSendspinWebSocketUrl() ?? '';
   }
 
   /// Start heartbeat timer using Sendspin's client/time for clock synchronization

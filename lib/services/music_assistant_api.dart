@@ -17,6 +17,7 @@ import 'device_id_service.dart';
 import 'retry_helper.dart';
 import 'auth/auth_manager.dart';
 import 'remote/direct_ws_transport.dart';
+import 'remote/http_endpoint_resolver.dart';
 import 'remote/ma_connection_transport.dart';
 
 enum MAConnectionState {
@@ -84,6 +85,11 @@ class MusicAssistantAPI {
     final withoutScheme = url.replaceFirst(RegExp(r'^https?://'), '');
     return RegExp(r'^[^/:]+:\d+').hasMatch(withoutScheme);
   }
+
+  HttpEndpointResolver get _httpEndpointResolver => HttpEndpointResolver(
+        serverUrl: serverUrl,
+        customPort: _cachedCustomPort,
+      );
 
   // Guard to prevent multiple simultaneous connection attempts
   Completer<void>? _connectionInProgress;
@@ -2503,68 +2509,12 @@ class MusicAssistantAPI {
       final contentType = currentItem.streamdetails!.contentType;
       final extension = _getExtension(contentType);
 
-      // Construct streaming URL using correct port
-      // Logic should match connect() but for HTTP/HTTPS streaming endpoint
-      
-      var baseUrl = serverUrl;
-      var useSecure = true;
-
-      if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-        // Determine protocol based on ws/wss if present, or default to http
-        if (baseUrl.startsWith('wss://')) {
-          baseUrl = 'https://' + baseUrl.substring(6);
-          useSecure = true;
-        } else if (baseUrl.startsWith('ws://')) {
-          baseUrl = 'http://' + baseUrl.substring(5);
-          useSecure = false;
-        } else {
-          // Default to secure
-          baseUrl = 'https://$baseUrl';
-          useSecure = true;
-        }
-      } else {
-        useSecure = baseUrl.startsWith('https://');
+      final streamUrl =
+          _httpEndpointResolver.buildFlowUrl(playerId, streamId, extension);
+      if (streamUrl == null) {
+        _logger.log('⚠️ No HTTP base URL available to build flow stream URL');
+        return null;
       }
-
-      final uri = Uri.parse(baseUrl);
-      
-      // Construct stream URL
-      // For reverse proxy compatibility, don't add default ports (80/443)
-      Uri finalUri;
-      if (_cachedCustomPort != null) {
-        // Use custom port from settings
-        finalUri = Uri(
-          scheme: uri.scheme,
-          host: uri.host,
-          port: _cachedCustomPort,
-          path: '/flow/$playerId/$streamId.$extension',
-        );
-      } else if (_hasExplicitPort(serverUrl)) {
-        // Use port from URL
-        finalUri = Uri(
-          scheme: uri.scheme,
-          host: uri.host,
-          port: uri.port,
-          path: '/flow/$playerId/$streamId.$extension',
-        );
-      } else if (useSecure) {
-        // For HTTPS with no custom port, omit port (implicit 443)
-        finalUri = Uri(
-          scheme: uri.scheme,
-          host: uri.host,
-          path: '/flow/$playerId/$streamId.$extension',
-        );
-      } else {
-        // For HTTP with no custom port, use MA default port 8095
-        finalUri = Uri(
-          scheme: uri.scheme,
-          host: uri.host,
-          port: NetworkConstants.defaultWsPort,
-          path: '/flow/$playerId/$streamId.$extension',
-        );
-      }
-
-      final streamUrl = finalUri.toString();
       _logger.log('Generated stream URL: $streamUrl');
 
       return streamUrl;
@@ -3234,35 +3184,6 @@ class MusicAssistantAPI {
   String getStreamUrl(String provider, String itemId, {String? uri, List<ProviderMapping>? providerMappings}) {
     // Debug logging
 
-    var baseUrl = serverUrl;
-    var useSecure = true;
-
-    // Determine protocol
-    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-      baseUrl = 'https://$baseUrl';
-      useSecure = true;
-    } else if (baseUrl.startsWith('http://')) {
-      useSecure = false;
-    }
-
-    // Add port if not specified
-    final uriObj = Uri.parse(baseUrl);
-
-    if (_cachedCustomPort != null) {
-      // Use cached custom port from settings
-      baseUrl = '${uriObj.scheme}://${uriObj.host}:$_cachedCustomPort';
-    } else if (!_hasExplicitPort(serverUrl)) {
-      if (useSecure) {
-        // For HTTPS, don't add port 443 (it's the default)
-        baseUrl = '${uriObj.scheme}://${uriObj.host}';
-      } else {
-        // For HTTP, default to Music Assistant port 8095
-        baseUrl = '${uriObj.scheme}://${uriObj.host}:8095';
-      }
-    } else {
-      baseUrl = '${uriObj.scheme}://${uriObj.host}:${uriObj.port}';
-    }
-
     String actualProvider = provider;
     String actualItemId = itemId;
 
@@ -3301,8 +3222,11 @@ class MusicAssistantAPI {
 
     // Music Assistant stream endpoint - use /preview endpoint
     // Format: /preview?item_id={itemId}&provider={provider}
-    final streamUrl = '$baseUrl/preview?item_id=$actualItemId&provider=$actualProvider';
-    return streamUrl;
+    return _httpEndpointResolver.buildPreviewUrl(
+          provider: actualProvider,
+          itemId: actualItemId,
+        ) ??
+        '';
   }
 
   // Get image URL
@@ -3334,45 +3258,12 @@ class MusicAssistantAPI {
     final imagePath = selectedImage['path'] as String?;
     if (imagePath == null || imagePath.isEmpty) return null;
 
-    // ALWAYS use imageproxy endpoint to ensure images route through MA server
-    // This fixes images not loading when connecting via external domain:
-    // - Direct URLs may contain internal IPs not reachable from outside the network
-    // - Streaming service URLs (Spotify, Tidal) may require auth or have CORS issues
-    // - MA's imageproxy fetches the image server-side and serves it through your server
-
-    // Build the imageproxy URL
-    var baseUrl = serverUrl;
-    var useSecure = true;
-
-    // Determine protocol
-    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-      baseUrl = 'https://$baseUrl';
-      useSecure = true;
-    } else if (baseUrl.startsWith('http://')) {
-      useSecure = false;
-    }
-
-    // Add port if not specified
-    final uri = Uri.parse(baseUrl);
-
-    if (_cachedCustomPort != null) {
-      // Use cached custom port from settings
-      baseUrl = '${uri.scheme}://${uri.host}:$_cachedCustomPort';
-    } else if (!_hasExplicitPort(serverUrl)) {
-      if (useSecure) {
-        // For HTTPS, don't add port 443 (it's the default)
-        baseUrl = '${uri.scheme}://${uri.host}';
-      } else {
-        // For HTTP, default to Music Assistant port 8095
-        baseUrl = '${uri.scheme}://${uri.host}:8095';
-      }
-    } else {
-      baseUrl = '${uri.scheme}://${uri.host}:${uri.port}';
-    }
-
     final provider = selectedImage['provider'] as String?;
-    // Use the imageproxy endpoint
-    return '$baseUrl/imageproxy?provider=${Uri.encodeComponent(provider ?? "")}&size=$size&fmt=jpeg&path=${Uri.encodeComponent(imagePath)}';
+    return _httpEndpointResolver.buildImageProxyUrl(
+      imagePath: imagePath,
+      provider: provider,
+      size: size,
+    );
   }
 
   // ==================== iTunes Artwork Lookup ====================

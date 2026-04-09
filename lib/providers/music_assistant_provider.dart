@@ -28,6 +28,7 @@ import '../services/sendspin_service.dart';
 import '../services/pcm_audio_player.dart';
 import '../services/offline_action_queue.dart';
 import '../services/image_prefetch_service.dart';
+import '../services/remote/http_endpoint_resolver.dart';
 import '../constants/timings.dart';
 import '../services/database_service.dart';
 import '../services/library_status_service.dart';
@@ -57,6 +58,8 @@ class MusicAssistantProvider with ChangeNotifier {
   String? get _serverUrl => _connectionProvider.serverUrl;
   List<String> get _providerFilter => _connectionProvider.providerFilter;
   List<String> get _playerFilter => _connectionProvider.playerFilter;
+  HttpEndpointResolver get _httpEndpointResolver =>
+      HttpEndpointResolver(serverUrl: _serverUrl);
 
   // Local error state (init failures, sendspin errors, etc. outside of connection flow)
   String? _error;
@@ -2325,7 +2328,7 @@ class MusicAssistantProvider with ChangeNotifier {
   ///   - Use local IP with port 8927 exposed, OR
   ///   - Manually configure reverse proxy to route /sendspin to port 8927
   Future<bool> _connectViaSendspin() async {
-    if (_api == null || _serverUrl == null) return false;
+    if (_api == null) return false;
 
     try {
       final serverVersion = _getServerVersionString();
@@ -2389,6 +2392,11 @@ class MusicAssistantProvider with ChangeNotifier {
         }
 
         _logger.log('⚠️ Sendspin: WebRTC data channel connection failed');
+        return false;
+      }
+
+      if (_serverUrl == null) {
+        _logger.log('⚠️ Sendspin: no direct server URL available for non-WebRTC connection');
         return false;
       }
 
@@ -2488,16 +2496,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
     try {
       // Build full URL if needed
-      String fullUrl = streamUrl;
-      if (!streamUrl.startsWith('http') && _serverUrl != null) {
-        var baseUrl = _serverUrl!;
-        if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-          baseUrl = 'https://$baseUrl';
-        }
-        baseUrl = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
-        final path = streamUrl.startsWith('/') ? streamUrl : '/$streamUrl';
-        fullUrl = '$baseUrl$path';
-      }
+      final fullUrl = _httpEndpointResolver.buildAbsoluteUrl(streamUrl) ?? streamUrl;
 
       // Extract metadata from track info
       final trackName = trackInfo['title'] as String? ?? trackInfo['name'] as String? ?? 'Unknown Track';
@@ -2521,7 +2520,16 @@ class MusicAssistantProvider with ChangeNotifier {
       _localPlayer.setCurrentTrackMetadata(metadata);
       _currentNotificationMetadata = metadata;
 
-      await _localPlayer.playUrl(fullUrl);
+      final hasResolvableHttpStream =
+          fullUrl.startsWith('http://') || fullUrl.startsWith('https://');
+      if (hasResolvableHttpStream) {
+        await _localPlayer.playUrl(fullUrl);
+      } else {
+        _logger.log(
+          'ℹ️ Sendspin: skipping URL playback for non-HTTP stream path; '
+          'PCM/WebRTC stream remains authoritative',
+        );
+      }
 
       // Report state back to MA
       _sendspinService?.reportState(playing: true, paused: false);
@@ -2814,18 +2822,17 @@ class MusicAssistantProvider with ChangeNotifier {
 
           _logger.log('🎵 play_media: urlPath=$urlPath, _serverUrl=$_serverUrl');
 
-          if (urlPath != null && _serverUrl != null) {
+          if (urlPath != null) {
             String fullUrl;
             if (urlPath.startsWith('http')) {
               fullUrl = urlPath;
             } else {
-              var baseUrl = _serverUrl!;
-              if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-                baseUrl = 'https://$baseUrl';
+              final resolvedUrl = _httpEndpointResolver.buildAbsoluteUrl(urlPath);
+              if (resolvedUrl == null) {
+                _logger.log('⚠️ play_media: no HTTP base URL available for relative media path');
+                break;
               }
-              baseUrl = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
-              final path = urlPath.startsWith('/') ? urlPath : '/$urlPath';
-              fullUrl = '$baseUrl$path';
+              fullUrl = resolvedUrl;
             }
 
             TrackMetadata metadata;
@@ -3090,22 +3097,8 @@ class MusicAssistantProvider with ChangeNotifier {
           Map<String, dynamic>? metadata;
           if (imageUrl != null) {
             var finalImageUrl = imageUrl;
-            if (_serverUrl != null) {
-              try {
-                final imgUri = Uri.parse(imageUrl);
-                final queryString = imgUri.query;
-                var baseUrl = _serverUrl!;
-                if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-                  baseUrl = 'https://$baseUrl';
-                }
-                if (baseUrl.endsWith('/')) {
-                  baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-                }
-                finalImageUrl = '$baseUrl/imageproxy?$queryString';
-              } catch (e) {
-                // Use original URL
-              }
-            }
+            finalImageUrl =
+                _httpEndpointResolver.rebuildImageProxyUrl(imageUrl) ?? imageUrl;
             metadata = {
               'images': [
                 {'path': finalImageUrl, 'provider': 'direct'}
@@ -3330,23 +3323,8 @@ class MusicAssistantProvider with ChangeNotifier {
       }
       artist ??= 'Unknown Artist';
 
-      if (imageUrl != null && _serverUrl != null) {
-        try {
-          final imgUri = Uri.parse(imageUrl);
-          final queryString = imgUri.query;
-          var baseUrl = _serverUrl!;
-          if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-            baseUrl = 'https://$baseUrl';
-          }
-          if (baseUrl.endsWith('/')) {
-            baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-          }
-          imageUrl = '$baseUrl/imageproxy?$queryString';
-        } catch (e) {
-          if (imageUrl != null && imageUrl.startsWith('http://')) {
-            imageUrl = imageUrl.replaceFirst('http://', 'https://');
-          }
-        }
+      if (imageUrl != null) {
+        imageUrl = _httpEndpointResolver.rebuildImageProxyUrl(imageUrl) ?? imageUrl;
       }
 
       final newMetadata = TrackMetadata(
