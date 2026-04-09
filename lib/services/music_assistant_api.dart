@@ -30,7 +30,7 @@ enum MAConnectionState {
 }
 
 class MusicAssistantAPI {
-  final String serverUrl;
+  String serverUrl;
   final AuthManager authManager;
   final _uuid = const Uuid();
   final _logger = DebugLogger();

@@ -34,6 +34,7 @@ class ConnectionProvider with ChangeNotifier {
 
   MusicAssistantAPI? _api;
   String? _serverUrl;
+  String? _discoveredHttpEndpoint;
   String? _error;
   MAConnectionState _connectionState = MAConnectionState.disconnected;
   String _preferredConnectionMode = 'direct';
@@ -62,7 +63,37 @@ class ConnectionProvider with ChangeNotifier {
 
   MusicAssistantAPI? get api => _api;
   AuthManager get authManager => _authManager;
-  String? get serverUrl => _serverUrl;
+
+  /// In WebRTC mode, returns the local HTTP endpoint discovered from MA event
+  /// data (e.g. http://192.168.1.135:8095). Falls back to the saved direct URL
+  /// or null when nothing is discovered yet.
+  String? get serverUrl =>
+      (_preferredConnectionMode == 'webrtc' && _webRtcEnabled)
+          ? _discoveredHttpEndpoint
+          : _serverUrl;
+
+  /// Called when an absolute MA imageproxy URL is seen in a player event.
+  /// Extracts the scheme+host+port and uses it as the HTTP base for image
+  /// URL building in WebRTC mode.
+  void updateDiscoveredHttpEndpoint(String imageProxyUrl) {
+    if (_preferredConnectionMode != 'webrtc' || !_webRtcEnabled) return;
+    try {
+      final uri = Uri.parse(imageProxyUrl);
+      if (!uri.hasScheme || uri.host.isEmpty) return;
+      final endpoint = Uri(
+        scheme: uri.scheme,
+        host: uri.host,
+        port: uri.hasPort ? uri.port : null,
+      ).toString().replaceAll(RegExp(r'/$'), '');
+      if (endpoint == _discoveredHttpEndpoint) return;
+      _discoveredHttpEndpoint = endpoint;
+      // Update the live API so its _httpEndpointResolver picks up the new base.
+      if (_api != null) {
+        _api!.serverUrl = endpoint;
+      }
+      notifyListeners();
+    } catch (_) {}
+  }
   String? get error => _error;
   MAConnectionState get connectionState => _connectionState;
   String get preferredConnectionMode => _preferredConnectionMode;

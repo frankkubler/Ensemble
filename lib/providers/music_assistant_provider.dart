@@ -3096,6 +3096,8 @@ class MusicAssistantProvider with ChangeNotifier {
 
           Map<String, dynamic>? metadata;
           if (imageUrl != null) {
+            // Discover local MA HTTP endpoint from the absolute imageproxy URL
+            _connectionProvider.updateDiscoveredHttpEndpoint(imageUrl);
             var finalImageUrl = imageUrl;
             finalImageUrl =
                 _httpEndpointResolver.rebuildImageProxyUrl(imageUrl) ?? imageUrl;
@@ -3324,6 +3326,8 @@ class MusicAssistantProvider with ChangeNotifier {
       artist ??= 'Unknown Artist';
 
       if (imageUrl != null) {
+        // Discover local MA HTTP endpoint from the absolute imageproxy URL
+        _connectionProvider.updateDiscoveredHttpEndpoint(imageUrl);
         imageUrl = _httpEndpointResolver.rebuildImageProxyUrl(imageUrl) ?? imageUrl;
       }
 

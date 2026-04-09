@@ -128,6 +128,11 @@ class HttpEndpointResolver {
   }) {
     final baseUri = buildBaseUri();
     if (baseUri == null) {
+      // If imagePath is already an absolute URL (e.g. Spotify CDN, Last.fm)
+      // return it directly — skips the proxy but at least shows the image.
+      if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+        return imagePath;
+      }
       return null;
     }
 
