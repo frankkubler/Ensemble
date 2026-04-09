@@ -1998,17 +1998,31 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('🎵 Notification: Skip to previous pressed');
       previousTrackSelectedPlayer();
     };
-    audioHandler.onPlay = () {
+    audioHandler.onPlay = () async {
       _logger.log('🎵 Notification: Play pressed');
-      if (_selectedPlayer != null) {
-        resumePlayer(_selectedPlayer!.playerId, fromUserGesture: true);
+      // During an AA session the builtin player may not yet be the selected
+      // player (race condition at AA connect). Target the builtin player
+      // directly to avoid sending play to a BT/ESP32 player that does not
+      // support the player_queues/play command (MA error 999).
+      String? targetPlayerId = _selectedPlayer?.playerId;
+      if (_aaSessionActive) {
+        final builtinId = await SettingsService.getBuiltinPlayerId();
+        if (builtinId != null) targetPlayerId = builtinId;
+      }
+      if (targetPlayerId != null) {
+        resumePlayer(targetPlayerId, fromUserGesture: true);
         unawaited(refreshPlayers());
       }
     };
-    audioHandler.onPause = () {
+    audioHandler.onPause = () async {
       _logger.log('🎵 Notification: Pause pressed');
-      if (_selectedPlayer != null) {
-        pausePlayer(_selectedPlayer!.playerId);
+      String? targetPlayerId = _selectedPlayer?.playerId;
+      if (_aaSessionActive) {
+        final builtinId = await SettingsService.getBuiltinPlayerId();
+        if (builtinId != null) targetPlayerId = builtinId;
+      }
+      if (targetPlayerId != null) {
+        pausePlayer(targetPlayerId);
       }
     };
     audioHandler.onSwitchPlayer = () {
@@ -4402,8 +4416,13 @@ class MusicAssistantProvider with ChangeNotifier {
               _matchesBuiltinId(_selectedPlayer!.playerId, builtinPlayerId);
           final currentIsAvailable = _selectedPlayer != null &&
               _availablePlayers.any((p) => p.playerId == _selectedPlayer!.playerId && p.available);
-          if (!currentIsBuiltin && currentIsAvailable && _selectedPlayer != null) {
-            // User has selected a non-builtin player that is online — respect their choice
+          // Respect user override: if the current player exists on the server (even
+          // temporarily unavailable due to BT state lag), lock the override flag and
+          // keep the selection rather than forcing back to frank's Phone.
+          final currentExistsOnServer = _selectedPlayer != null &&
+              _availablePlayers.any((p) => p.playerId == _selectedPlayer!.playerId);
+          if (!currentIsBuiltin && (currentIsAvailable || currentExistsOnServer) && _selectedPlayer != null) {
+            // User has selected a non-builtin player — respect their choice
             // and implicitly set the user-override flag to stabilise future refreshes.
             _aaUserOverride = true;
             _logger.log('🚗 AA session active: user has non-builtin player "${_selectedPlayer!.name}" — respecting selection');

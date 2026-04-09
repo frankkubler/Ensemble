@@ -3298,7 +3298,7 @@ class MusicAssistantAPI {
     }
 
     final imagePath = selectedImage['path'] as String?;
-    if (imagePath == null) return null;
+    if (imagePath == null || imagePath.isEmpty) return null;
 
     // ALWAYS use imageproxy endpoint to ensure images route through MA server
     // This fixes images not loading when connecting via external domain:
