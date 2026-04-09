@@ -81,6 +81,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   // Android Auto method channel (Dart ↔ Native)
   static const _aaChannel = MethodChannel('com.collotsspot.ensemble/android_auto');
+  bool _aaNativeChannelAvailable = true;
+  bool _loggedAANativeChannelMissing = false;
 
   // Custom control for switching players
   static final _switchPlayerControl = MediaControl.custom(
@@ -91,6 +93,23 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   MassivAudioHandler({required this.authManager}) {
     _init();
+  }
+
+  Future<void> _notifyAAConnectedNative() async {
+    if (!_aaNativeChannelAvailable) return;
+
+    try {
+      await _aaChannel.invokeMethod('notifyAAConnected');
+    } on MissingPluginException {
+      _aaNativeChannelAvailable = false;
+      if (_loggedAANativeChannelMissing) return;
+      _loggedAANativeChannelMissing = true;
+      _logger.log(
+        'AndroidAuto: native channel unavailable in this Flutter engine, skipping notifyAAConnected',
+      );
+    } catch (e) {
+      _logger.log('AndroidAuto: notifyAAConnected failed: $e');
+    }
   }
 
   Future<void> _init() async {
@@ -168,7 +187,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           if (_isAndroidAutoConnected) break; // already handled via getChildren/playFromMediaId
           _logger.log('AndroidAuto: car mode connected (broadcast)');
           _isAndroidAutoConnected = true;
-          _aaChannel.invokeMethod('notifyAAConnected', null);
+          unawaited(_notifyAAConnectedNative());
           onAAConnected?.call();
           _refreshPlaybackState();
         case 'onAndroidAutoDisconnected':
@@ -693,7 +712,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     if (!_isAndroidAutoConnected) {
       _logger.log('AndroidAuto: detected AA connection via getChildren("$parentMediaId")');
       _isAndroidAutoConnected = true;
-      _aaChannel.invokeMethod('notifyAAConnected', null);
+      await _notifyAAConnectedNative();
       // Sync shuffle/repeat state from the queue so AA buttons show correctly
       final selectedId = provider.selectedPlayer?.playerId;
       if (selectedId != null) {
@@ -858,7 +877,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     if (!_isAndroidAutoConnected) {
       _logger.log('AndroidAuto: detected AA connection via playFromMediaId');
       _isAndroidAutoConnected = true;
-      _aaChannel.invokeMethod('notifyAAConnected', null);
+      await _notifyAAConnectedNative();
       _refreshPlaybackState();
       // Delegate player switching + queue restoration to onAAConnected
       onAAConnected?.call();

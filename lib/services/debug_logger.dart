@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -17,19 +19,23 @@ class LogEntry {
   final LogLevel level;
   final String message;
   final String? context;
+  final String engine;
+  final String isolate;
 
   LogEntry({
     required this.timestamp,
     required this.level,
     required this.message,
     this.context,
+    required this.engine,
+    required this.isolate,
   });
 
   String get formatted {
     final time = timestamp.toIso8601String().substring(11, 23);
     final levelStr = level.name.toUpperCase().padRight(5);
     final contextStr = context != null ? '[$context] ' : '';
-    return '[$time] $levelStr $contextStr$message';
+    return '[$time] $levelStr [$engine/$isolate] $contextStr$message';
   }
 }
 
@@ -53,6 +59,23 @@ class DebugLogger {
   // Set to false for normal operation with full logging for user bug reports
   static const bool _perfOnlyMode = false;
 
+  static String currentEngineLabel() {
+    try {
+      return ui.PlatformDispatcher.instance.implicitView == null ? 'HEADLESS' : 'UI';
+    } catch (_) {
+      return 'UNKNOWN';
+    }
+  }
+
+  static String currentIsolateLabel() {
+    final isolate = Isolate.current;
+    final debugName = isolate.debugName;
+    if (debugName != null && debugName.isNotEmpty) {
+      return debugName;
+    }
+    return 'iso-${isolate.hashCode.toRadixString(16)}';
+  }
+
   void _addEntry(LogLevel level, String message, {String? context}) {
     // In perf-only mode, skip all non-perf logs
     if (_perfOnlyMode && level != LogLevel.perf) {
@@ -64,6 +87,8 @@ class DebugLogger {
       level: level,
       message: message,
       context: context,
+      engine: currentEngineLabel(),
+      isolate: currentIsolateLabel(),
     );
 
     // Always store in memory
@@ -222,10 +247,24 @@ class DebugLogger {
     // Log statistics
     final errorCount = _entries.where((e) => e.level == LogLevel.error).length;
     final warningCount = _entries.where((e) => e.level == LogLevel.warning).length;
+    final engineBreakdown = <String, int>{};
+    for (final entry in _entries) {
+      final key = '${entry.engine}/${entry.isolate}';
+      engineBreakdown.update(key, (count) => count + 1, ifAbsent: () => 1);
+    }
+
     buffer.writeln('LOG SUMMARY:');
     buffer.writeln('  Total entries: ${_entries.length}');
     buffer.writeln('  Errors: $errorCount');
     buffer.writeln('  Warnings: $warningCount');
+    if (engineBreakdown.isNotEmpty) {
+      buffer.writeln('  Engines:');
+      final sortedEntries = engineBreakdown.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      for (final entry in sortedEntries) {
+        buffer.writeln('    ${entry.key}: ${entry.value}');
+      }
+    }
     buffer.writeln();
 
     buffer.writeln('═══════════════════════════════════════');

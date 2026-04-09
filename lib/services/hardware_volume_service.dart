@@ -41,9 +41,34 @@ class HardwareVolumeService {
   bool _isObservingVolume = false;
   bool get isObservingVolume => _isObservingVolume;
 
+  bool _nativeChannelAvailable = true;
+  bool _loggedNativeChannelMissing = false;
+
+  Future<T?> _invokeNative<T>(String method, [dynamic arguments]) async {
+    if (!_nativeChannelAvailable) return null;
+
+    try {
+      return await _channel.invokeMethod<T>(method, arguments);
+    } on MissingPluginException {
+      _nativeChannelAvailable = false;
+      _isListening = false;
+      _isIntercepting = false;
+      _isObservingVolume = false;
+
+      if (!_loggedNativeChannelMissing) {
+        _loggedNativeChannelMissing = true;
+        _logger.info(
+          'Native volume channel unavailable in this Flutter engine; hardware volume integration disabled',
+          context: 'VolumeService',
+        );
+      }
+      return null;
+    }
+  }
+
   /// Initialize the service and start listening for volume button events
   Future<void> init() async {
-    if (_isListening) return;
+    if (_isListening || !_nativeChannelAvailable) return;
 
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
@@ -62,7 +87,8 @@ class HardwareVolumeService {
     });
 
     try {
-      await _channel.invokeMethod('startListening');
+      await _invokeNative('startListening');
+      if (!_nativeChannelAvailable) return;
       _isListening = true;
       _isIntercepting = true;
     } catch (e) {
@@ -74,14 +100,16 @@ class HardwareVolumeService {
   /// When disabled, hardware volume buttons control device volume normally.
   /// When enabled, volume button events are sent to Flutter for MA player control.
   Future<void> setIntercepting(bool intercept) async {
-    if (!_isListening || _isIntercepting == intercept) return;
+    if (!_nativeChannelAvailable || !_isListening || _isIntercepting == intercept) return;
 
     try {
       if (intercept) {
-        await _channel.invokeMethod('startListening');
+        await _invokeNative('startListening');
+        if (!_nativeChannelAvailable) return;
         _isIntercepting = true;
       } else {
-        await _channel.invokeMethod('stopListening');
+        await _invokeNative('stopListening');
+        if (!_nativeChannelAvailable) return;
         _isIntercepting = false;
       }
     } catch (e) {
@@ -94,12 +122,13 @@ class HardwareVolumeService {
   /// to Flutter via [onAbsoluteVolumeChange]. Optionally sets the system
   /// volume to [initialVolume] (0-100) to match the MA player's current volume.
   Future<void> startVolumeObserver({int? initialVolume}) async {
-    if (_isObservingVolume) return;
+    if (!_nativeChannelAvailable || _isObservingVolume) return;
 
     try {
-      await _channel.invokeMethod('startVolumeObserver', {
+      await _invokeNative('startVolumeObserver', {
         if (initialVolume != null) 'initialVolume': initialVolume,
       });
+      if (!_nativeChannelAvailable) return;
       _isObservingVolume = true;
       _logger.info('Volume observer started', context: 'VolumeService');
     } catch (e) {
@@ -109,10 +138,11 @@ class HardwareVolumeService {
 
   /// Stop the volume observer.
   Future<void> stopVolumeObserver() async {
-    if (!_isObservingVolume) return;
+    if (!_nativeChannelAvailable || !_isObservingVolume) return;
 
     try {
-      await _channel.invokeMethod('stopVolumeObserver');
+      await _invokeNative('stopVolumeObserver');
+      if (!_nativeChannelAvailable) return;
       _isObservingVolume = false;
       _logger.info('Volume observer stopped', context: 'VolumeService');
     } catch (e) {
@@ -123,8 +153,10 @@ class HardwareVolumeService {
   /// Sync the system volume to match the MA player volume (0-100).
   /// Used to keep the system volume HUD in sync with the MA player.
   Future<void> syncSystemVolume(int maVolume) async {
+    if (!_nativeChannelAvailable) return;
+
     try {
-      await _channel.invokeMethod('syncSystemVolume', {'volume': maVolume});
+      await _invokeNative('syncSystemVolume', {'volume': maVolume});
     } catch (e) {
       _logger.error('Failed to sync system volume', context: 'VolumeService', error: e);
     }
@@ -136,10 +168,11 @@ class HardwareVolumeService {
       await stopVolumeObserver();
     }
 
-    if (!_isListening) return;
+    if (!_nativeChannelAvailable || !_isListening) return;
 
     try {
-      await _channel.invokeMethod('stopListening');
+      await _invokeNative('stopListening');
+      if (!_nativeChannelAvailable) return;
       _isListening = false;
       _isIntercepting = false;
       _logger.info('Hardware volume button listening stopped', context: 'VolumeService');
