@@ -1,22 +1,22 @@
 import 'dart:async';
 
 import 'sendspin_transport.dart';
-import 'webrtc_connection_manager.dart';
+import 'webrtc_shared_session.dart';
 
 class WebRtcSendspinTransport implements SendspinTransport {
   WebRtcSendspinTransport({required this.remoteId});
 
   final String remoteId;
-  WebRtcConnectionManager? _manager;
+  WebRtcSharedSession? _session;
 
   @override
   String get label => 'webrtc-sendspin';
 
   @override
-  bool get isConnected => _manager?.isConnected ?? false;
+  bool get isConnected => _session?.isConnected ?? false;
 
   @override
-  Stream<dynamic> get messages => _manager?.sendspinMessages ?? const Stream.empty();
+  Stream<dynamic> get messages => _session?.sendspinMessages ?? const Stream.empty();
 
   @override
   Future<void> connect({
@@ -25,29 +25,30 @@ class WebRtcSendspinTransport implements SendspinTransport {
     String? authToken,
     bool useProxyAuth = false,
   }) async {
-    final manager = WebRtcConnectionManager(
-      remoteId: remoteId,
-      enableApiChannel: false,
-      enableSendspinChannel: true,
+    final session = WebRtcSharedSessionRegistry.acquire(
+      remoteId,
+      WebRtcSessionChannel.sendspin,
     );
-    _manager = manager;
-    await manager.connect();
+    _session = session;
+    await session.ensureConnected();
   }
 
   @override
   Future<void> send(String message) async {
-    final manager = _manager;
-    if (manager == null) {
+    final session = _session;
+    if (session == null) {
       throw StateError('WebRTC Sendspin transport is not connected');
     }
 
-    await manager.sendSendspinMessage(message);
+    await session.sendSendspinMessage(message);
   }
 
   @override
   Future<void> close() async {
-    await _manager?.disconnect();
-    _manager?.dispose();
-    _manager = null;
+    final session = _session;
+    _session = null;
+    if (session != null) {
+      await session.release(WebRtcSessionChannel.sendspin);
+    }
   }
 }

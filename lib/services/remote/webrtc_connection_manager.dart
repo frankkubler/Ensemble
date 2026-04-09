@@ -112,8 +112,11 @@ class WebRtcConnectionManager {
   }
 
   void dispose() {
+    if (_disposed) {
+      return;
+    }
+
     _disposed = true;
-    disconnect();
     _stateController.close();
     _messageController.close();
     _sendspinMessageController.close();

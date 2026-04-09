@@ -78,7 +78,8 @@ class SignalingClient {
   }
 
   void dispose() {
-    disconnect();
+    _channel = null;
+    _subscription = null;
     _stateController.close();
     _messageController.close();
   }

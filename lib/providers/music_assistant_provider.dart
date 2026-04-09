@@ -773,21 +773,23 @@ class MusicAssistantProvider with ChangeNotifier {
   PositionTracker get positionTracker => _positionTracker;
 
   /// Whether Sendspin (PCM streaming) is connected for builtin player
-  bool get isSendspinConnected => _sendspinConnected;
+  bool get isSendspinConnected =>
+      _sendspinService?.state == SendspinConnectionState.connected ||
+      _sendspinConnected;
 
   /// Whether PCM audio is currently playing via Sendspin
-  bool get isPcmPlaying => _sendspinConnected && _pcmAudioPlayer != null && _pcmAudioPlayer!.isPlaying;
+  bool get isPcmPlaying => isSendspinConnected && _pcmAudioPlayer != null && _pcmAudioPlayer!.isPlaying;
 
   /// Get current PCM audio format info (when using Sendspin)
   /// Returns null if not using Sendspin PCM streaming
   String? get currentAudioFormat {
-    if (!_sendspinConnected || _pcmAudioPlayer == null) return null;
+    if (!isSendspinConnected || _pcmAudioPlayer == null) return null;
     return '48kHz • Stereo • 16-bit PCM';
   }
 
   /// Get the current playback source description
   String get playbackSource {
-    if (_sendspinConnected && _pcmAudioPlayer != null) {
+    if (isSendspinConnected && _pcmAudioPlayer != null) {
       return 'Sendspin (Local PCM)';
     }
     return 'Music Assistant';
@@ -1860,7 +1862,7 @@ class MusicAssistantProvider with ChangeNotifier {
     _imagePrefetchService?.cancel();
     _imagePrefetchService = null;
     // Disconnect Sendspin and PCM player if connected
-    if (_sendspinConnected) {
+    if (_sendspinService != null) {
       await _pcmAudioPlayer?.disconnect();
       await _sendspinService?.disconnect();
       _sendspinConnected = false;
@@ -1966,10 +1968,14 @@ class MusicAssistantProvider with ChangeNotifier {
           // Verify Sendspin PCM streaming is still alive.
           // After app resume the API WebSocket may be up but Sendspin dead,
           // leading to "playing" notification with no actual audio output.
-          if (!_sendspinConnected ||
+          if (!isSendspinConnected ||
               _sendspinService == null ||
               _sendspinService!.state != SendspinConnectionState.connected) {
-            _logger.log('🔄 Sendspin not connected, re-establishing PCM streaming...');
+            _logger.log(
+              '🔄 Sendspin not connected, re-establishing PCM streaming '
+              '(flag=$isSendspinConnected, service=${_sendspinService != null}, '
+              'state=${_sendspinService?.state.name ?? 'null'})...',
+            );
             final reconnected = await _connectViaSendspin();
             if (reconnected) {
               _logger.log('🔄 Sendspin reconnection successful');
@@ -2052,6 +2058,10 @@ class MusicAssistantProvider with ChangeNotifier {
       _aaSessionActive = true;
       _aaUserOverride = false; // Clear any previous user override when AA reconnects
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+      _logger.log(
+        '🎵 AA connected: builtin=$builtinPlayerId selected=${_selectedPlayer?.playerId} '
+        'sendspinState=${_sendspinService?.state.name ?? 'null'}',
+      );
       if (builtinPlayerId == null) return;
 
       // Remember the previously active player (e.g. SOUNDBAR_BT / ESP32)
@@ -2097,6 +2107,10 @@ class MusicAssistantProvider with ChangeNotifier {
       _aaSessionActive = false;
       _aaUserOverride = false; // Clear user override when AA disconnects
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+      _logger.log(
+        '🎵 AA disconnected: builtin=$builtinPlayerId selected=${_selectedPlayer?.playerId} '
+        'sendspinState=${_sendspinService?.state.name ?? 'null'}',
+      );
       if (builtinPlayerId != null) {
         _logger.log('🎵 AA disconnected: snapshotting state then pausing builtin player');
         // Snapshot queue + position BEFORE pausing so they survive server-side queue clear
@@ -2322,7 +2336,10 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('Sendspin: Server version $serverVersion, has proxy: $hasProxy');
 
       // Initialize Sendspin service
-      _sendspinService?.dispose();
+      if (_sendspinService != null) {
+        await _sendspinService!.disconnect();
+        _sendspinService!.dispose();
+      }
       _sendspinService = SendspinService(
         _serverUrl!,
         transportBuilder: wantsWebRtc

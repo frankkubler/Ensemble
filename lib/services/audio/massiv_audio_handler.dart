@@ -1105,7 +1105,10 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           // the player — without it the notification shows "playing"
           // but no audio reaches the speakers.
           if (!provider.isSendspinConnected) {
-            _logger.log('AndroidAuto: Sendspin not connected, waiting...');
+            _logger.log(
+              'AndroidAuto: Sendspin not connected for builtin candidate '
+              '"${candidate.name}" (${candidate.playerId}), waiting...',
+            );
             throw Exception('Sendspin PCM not ready');
           }
 

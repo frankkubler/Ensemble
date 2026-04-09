@@ -1,13 +1,13 @@
 import 'dart:async';
 
 import 'ma_connection_transport.dart';
-import 'webrtc_connection_manager.dart';
+import 'webrtc_shared_session.dart';
 
 class WebRtcApiTransport implements MAConnectionTransport {
   WebRtcApiTransport({required this.remoteId});
 
   final String remoteId;
-  WebRtcConnectionManager? _manager;
+  WebRtcSharedSession? _session;
 
   @override
   MAConnectionMode get mode => MAConnectionMode.webrtc;
@@ -16,32 +16,37 @@ class WebRtcApiTransport implements MAConnectionTransport {
   String get label => 'webrtc-ma-api';
 
   @override
-  bool get isConnected => _manager?.isConnected ?? false;
+  bool get isConnected => _session?.isConnected ?? false;
 
   @override
-  Stream<dynamic> get messages => _manager?.messages ?? const Stream.empty();
+  Stream<dynamic> get messages => _session?.apiMessages ?? const Stream.empty();
 
   @override
   Future<void> connect(MAConnectionContext context) async {
-    final manager = WebRtcConnectionManager(remoteId: remoteId);
-    _manager = manager;
-    await manager.connect();
+    final session = WebRtcSharedSessionRegistry.acquire(
+      remoteId,
+      WebRtcSessionChannel.api,
+    );
+    _session = session;
+    await session.ensureConnected();
   }
 
   @override
   Future<void> send(String message) async {
-    final manager = _manager;
-    if (manager == null) {
+    final session = _session;
+    if (session == null) {
       throw StateError('WebRTC transport is not connected');
     }
 
-    await manager.sendApiMessage(message);
+    await session.sendApiMessage(message);
   }
 
   @override
   Future<void> close() async {
-    await _manager?.disconnect();
-    _manager?.dispose();
-    _manager = null;
+    final session = _session;
+    _session = null;
+    if (session != null) {
+      await session.release(WebRtcSessionChannel.api);
+    }
   }
 }

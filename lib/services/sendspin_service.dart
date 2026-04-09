@@ -44,7 +44,24 @@ class SendspinService {
 
   // Connection state
   SendspinConnectionState _state = SendspinConnectionState.disconnected;
-  SendspinConnectionState get state => _state;
+  SendspinConnectionState get state {
+    if (_state == SendspinConnectionState.connecting) {
+      return _state;
+    }
+
+    if (_transportBuilder != null) {
+      final connected = _transport?.isConnected ?? false;
+      if (connected) {
+        return SendspinConnectionState.connected;
+      }
+      if (_state == SendspinConnectionState.error) {
+        return SendspinConnectionState.error;
+      }
+      return SendspinConnectionState.disconnected;
+    }
+
+    return _state;
+  }
 
   final _stateController = StreamController<SendspinConnectionState>.broadcast();
   Stream<SendspinConnectionState> get stateStream => _stateController.stream;
@@ -635,7 +652,7 @@ class SendspinService {
     if (_transport == null) return;
 
     // During handshake, we need to send hello even though state is still 'connecting'
-    if (!allowDuringHandshake && _state != SendspinConnectionState.connected) return;
+    if (!allowDuringHandshake && state != SendspinConnectionState.connected) return;
 
     try {
       final json = jsonEncode(message);
