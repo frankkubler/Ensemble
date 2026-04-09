@@ -31,6 +31,31 @@
     "description": "Hint text for server address field"
   },
 
+  "connectionMethod": "Mode de connexion",
+  "@connectionMethod": {
+    "description": "Label for choosing direct or WebRTC connection"
+  },
+
+  "directConnection": "Direct",
+  "@directConnection": {
+    "description": "Direct connection mode label"
+  },
+
+  "webRtcConnection": "WebRTC",
+  "@webRtcConnection": {
+    "description": "WebRTC connection mode label"
+  },
+
+  "remoteId": "Remote ID",
+  "@remoteId": {
+    "description": "Remote ID field label"
+  },
+
+  "remoteIdHint": "ex. PGSVXKGZ-JCFA6-MOH4U-PBH5Q9HY",
+  "@remoteIdHint": {
+    "description": "Hint text for the WebRTC remote ID"
+  },
+
   "yourName": "Votre nom",
   "@yourName": {
     "description": "Login screen name field label"
@@ -154,6 +179,11 @@
   "pleaseEnterCredentials": "Veuillez entrer le nom d'utilisateur et le mot de passe",
   "@pleaseEnterCredentials": {
     "description": "Validation message for credentials"
+  },
+
+  "pleaseEnterRemoteId": "Veuillez entrer un Remote ID",
+  "@pleaseEnterRemoteId": {
+    "description": "Validation message for missing WebRTC remote ID"
   },
 
   "authFailed": "Echec de l'authentification. Veuillez verifier vos identifiants.",

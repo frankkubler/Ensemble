@@ -27,6 +27,21 @@ class SDe extends S {
   String get serverAddressHint => 'z.B. music.example.com oder 192.168.1.100';
 
   @override
+  String get connectionMethod => 'Verbindungsmethode';
+
+  @override
+  String get directConnection => 'Direkt';
+
+  @override
+  String get webRtcConnection => 'WebRTC';
+
+  @override
+  String get remoteId => 'Remote-ID';
+
+  @override
+  String get remoteIdHint => 'z.B. PGSVXKGZ-JCFA6-MOH4U-PBH5Q9HY';
+
+  @override
   String get yourName => 'Dein Name';
 
   @override
@@ -107,6 +122,9 @@ class SDe extends S {
   @override
   String get pleaseEnterCredentials =>
       'Bitte gib Benutzername und Passwort ein';
+
+  @override
+  String get pleaseEnterRemoteId => 'Bitte gib eine Remote-ID ein';
 
   @override
   String get authFailed =>

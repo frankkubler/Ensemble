@@ -27,6 +27,21 @@ class SEn extends S {
   String get serverAddressHint => 'e.g., music.example.com or 192.168.1.100';
 
   @override
+  String get connectionMethod => 'Connection Method';
+
+  @override
+  String get directConnection => 'Direct';
+
+  @override
+  String get webRtcConnection => 'WebRTC';
+
+  @override
+  String get remoteId => 'Remote ID';
+
+  @override
+  String get remoteIdHint => 'e.g., PGSVXKGZ-JCFA6-MOH4U-PBH5Q9HY';
+
+  @override
   String get yourName => 'Your Name';
 
   @override
@@ -104,6 +119,9 @@ class SEn extends S {
 
   @override
   String get pleaseEnterCredentials => 'Please enter username and password';
+
+  @override
+  String get pleaseEnterRemoteId => 'Please enter a Remote ID';
 
   @override
   String get authFailed =>

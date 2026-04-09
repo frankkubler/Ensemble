@@ -27,6 +27,21 @@ class SEs extends S {
   String get serverAddressHint => 'ej., music.example.com o 192.168.1.100';
 
   @override
+  String get connectionMethod => 'Método de conexión';
+
+  @override
+  String get directConnection => 'Directa';
+
+  @override
+  String get webRtcConnection => 'WebRTC';
+
+  @override
+  String get remoteId => 'Remote ID';
+
+  @override
+  String get remoteIdHint => 'ej., PGSVXKGZ-JCFA6-MOH4U-PBH5Q9HY';
+
+  @override
   String get yourName => 'Tu nombre';
 
   @override
@@ -108,6 +123,9 @@ class SEs extends S {
   @override
   String get pleaseEnterCredentials =>
       'Por favor, introduce usuario y contraseña';
+
+  @override
+  String get pleaseEnterRemoteId => 'Por favor, introduce un Remote ID';
 
   @override
   String get authFailed =>

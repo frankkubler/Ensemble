@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../services/music_assistant_api.dart';
+import '../services/remote/webrtc_api_transport.dart';
 import '../services/settings_service.dart';
 import '../services/debug_logger.dart';
 import '../services/error_handler.dart';
@@ -183,17 +184,16 @@ class ConnectionProvider with ChangeNotifier {
           _webRtcRemoteId != null &&
           _webRtcRemoteId!.isNotEmpty;
 
-      if (wantsWebRtc) {
-        _logger.log(
-          'WebRTC is enabled and preferred for remote ID $_webRtcRemoteId, '
-          'but session transport is not wired yet. Falling back to direct transport.',
-        );
-      }
-
       // Dispose old API to stop pending reconnects
       _api?.dispose();
 
-      _api = MusicAssistantAPI(serverUrl, _authManager);
+      _api = MusicAssistantAPI(
+        serverUrl,
+        _authManager,
+        transportBuilder: wantsWebRtc
+        ? (_) => WebRtcApiTransport(remoteId: _webRtcRemoteId!)
+        : null,
+      );
 
       // Notify MAP so it can resubscribe to API event streams
       onApiCreated?.call(_api!);
@@ -202,7 +202,7 @@ class ConnectionProvider with ChangeNotifier {
       _connectionStateSubscription = _api!.connectionState.listen(
         (state) async {
           if (state == MAConnectionState.connected) {
-            _logger.log('🔗 WebSocket connected to MA server');
+            _logger.log('🔗 Connection established to MA server');
 
             if (_api!.authRequired && !_api!.isAuthenticated) {
               // Don't broadcast 'connected' yet — AppStartup watches isConnected

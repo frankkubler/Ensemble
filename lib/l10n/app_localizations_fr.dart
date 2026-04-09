@@ -27,6 +27,21 @@ class SFr extends S {
   String get serverAddressHint => 'ex., music.example.com ou 192.168.1.100';
 
   @override
+  String get connectionMethod => 'Mode de connexion';
+
+  @override
+  String get directConnection => 'Direct';
+
+  @override
+  String get webRtcConnection => 'WebRTC';
+
+  @override
+  String get remoteId => 'Remote ID';
+
+  @override
+  String get remoteIdHint => 'ex. PGSVXKGZ-JCFA6-MOH4U-PBH5Q9HY';
+
+  @override
   String get yourName => 'Votre nom';
 
   @override
@@ -108,6 +123,9 @@ class SFr extends S {
   @override
   String get pleaseEnterCredentials =>
       'Veuillez entrer le nom d\'utilisateur et le mot de passe';
+
+  @override
+  String get pleaseEnterRemoteId => 'Veuillez entrer un Remote ID';
 
   @override
   String get authFailed =>

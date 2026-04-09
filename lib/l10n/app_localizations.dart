@@ -137,6 +137,36 @@ abstract class S {
   /// **'e.g., music.example.com or 192.168.1.100'**
   String get serverAddressHint;
 
+  /// Label for choosing direct or WebRTC connection
+  ///
+  /// In en, this message translates to:
+  /// **'Connection Method'**
+  String get connectionMethod;
+
+  /// Direct connection mode label
+  ///
+  /// In en, this message translates to:
+  /// **'Direct'**
+  String get directConnection;
+
+  /// WebRTC connection mode label
+  ///
+  /// In en, this message translates to:
+  /// **'WebRTC'**
+  String get webRtcConnection;
+
+  /// Remote ID field label
+  ///
+  /// In en, this message translates to:
+  /// **'Remote ID'**
+  String get remoteId;
+
+  /// Hint text for the WebRTC remote ID
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., PGSVXKGZ-JCFA6-MOH4U-PBH5Q9HY'**
+  String get remoteIdHint;
+
   /// Login screen name field label
   ///
   /// In en, this message translates to:
@@ -280,6 +310,12 @@ abstract class S {
   /// In en, this message translates to:
   /// **'Please enter username and password'**
   String get pleaseEnterCredentials;
+
+  /// Validation message for missing WebRTC remote ID
+  ///
+  /// In en, this message translates to:
+  /// **'Please enter a Remote ID'**
+  String get pleaseEnterRemoteId;
 
   /// Authentication failed error
   ///
