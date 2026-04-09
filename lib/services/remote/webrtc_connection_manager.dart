@@ -188,14 +188,37 @@ class WebRtcConnectionManager {
         }
         _setState(WebRtcConnectionState.error);
       } else if (state ==
-              RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+          RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        // Treat DISCONNECTED as error (same as official KMP app) to trigger
+        // fast reconnection — a transient disconnect will reconnect quickly anyway.
+        _logger.warning('WebRTC [$remoteId]: ICE connection disconnected');
+        _setState(WebRtcConnectionState.error);
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         _setState(WebRtcConnectionState.disconnected);
       }
     };
 
-    // NOTE: data channels are created by the gateway (server-initiates).
-    // Do NOT call createDataChannel() here — the channels arrive via onDataChannel.
+    // Data channels MUST be created before createOffer() so that the SDP offer
+    // includes the m=application section required for SCTP negotiation.
+    // The gateway may also create its own channel from its side; if it does,
+    // onDataChannel fires and _bind*Channel replaces the client-created channel.
+    if (enableApiChannel) {
+      _logger.log('WebRTC [$remoteId]: creating ma-api data channel');
+      final apiChannel = await _peerConnection!.createDataChannel(
+        'ma-api',
+        RTCDataChannelInit()..ordered = true,
+      );
+      _bindApiChannel(apiChannel);
+    }
+
+    if (enableSendspinChannel) {
+      _logger.log('WebRTC [$remoteId]: creating sendspin data channel');
+      final sendspinChannel = await _peerConnection!.createDataChannel(
+        'sendspin',
+        RTCDataChannelInit()..ordered = true,
+      );
+      _bindSendspinChannel(sendspinChannel);
+    }
 
     final offer = await _peerConnection!.createOffer({
       'offerToReceiveAudio': false,
