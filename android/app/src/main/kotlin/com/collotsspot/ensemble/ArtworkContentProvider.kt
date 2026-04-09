@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Base64
+import android.util.Log
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -23,6 +24,7 @@ import java.security.MessageDigest
 class ArtworkContentProvider : ContentProvider() {
 
     companion object {
+        private const val TAG = "AAArtworkProvider"
         private const val CONNECT_TIMEOUT_MS = 5000
         private const val READ_TIMEOUT_MS = 10000
     }
@@ -31,10 +33,12 @@ class ArtworkContentProvider : ContentProvider() {
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val encoded = uri.lastPathSegment ?: return null
+        val authToken = uri.getQueryParameter("token")
         val httpUrl: String
         try {
             httpUrl = String(Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP))
         } catch (e: Exception) {
+            Log.w(TAG, "Failed to decode artwork URI", e)
             return null
         }
 
@@ -50,7 +54,16 @@ class ArtworkContentProvider : ContentProvider() {
                 connection.connectTimeout = CONNECT_TIMEOUT_MS
                 connection.readTimeout = READ_TIMEOUT_MS
                 connection.instanceFollowRedirects = true
+                connection.setRequestProperty("Accept", "image/*")
+                if (!authToken.isNullOrEmpty()) {
+                    connection.setRequestProperty("Authorization", "Bearer $authToken")
+                }
                 try {
+                    if (connection.responseCode !in 200..299) {
+                        Log.w(TAG, "Artwork fetch failed: ${connection.responseCode} for $httpUrl")
+                        cacheFile.delete()
+                        return null
+                    }
                     connection.inputStream.use { input ->
                         cacheFile.outputStream().use { output ->
                             input.copyTo(output)
@@ -60,6 +73,7 @@ class ArtworkContentProvider : ContentProvider() {
                     connection.disconnect()
                 }
             } catch (e: Exception) {
+                Log.w(TAG, "Artwork download failed for $httpUrl", e)
                 cacheFile.delete()
                 return null
             }

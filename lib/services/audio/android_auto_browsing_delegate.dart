@@ -84,15 +84,33 @@ class AndroidAutoBrowsingDelegate {
 
   static const _artworkAuthority = 'com.collotsspot.ensemble.artwork';
 
-  Uri? artUri(MusicAssistantProvider provider, ma.MediaItem item) {
-    final url = provider.getImageUrl(item, size: 256);
+  Uri? artUri(MusicAssistantProvider provider, ma.MediaItem item, {String? imageUrl}) {
+    final url = imageUrl ?? provider.getImageUrl(item, size: 256);
     if (url == null) return null;
-    return _contentUriForArtwork(url);
+    return _contentUriForArtwork(url, token: provider.authManager.token);
   }
 
-  static Uri? _contentUriForArtwork(String httpUrl) {
+  static Uri? _contentUriForArtwork(String httpUrl, {String? token}) {
     final encoded = base64Url.encode(const Utf8Encoder().convert(httpUrl));
-    return Uri.tryParse('content://$_artworkAuthority/$encoded');
+    return Uri(
+      scheme: 'content',
+      host: _artworkAuthority,
+      path: '/$encoded',
+      queryParameters: token == null || token.isEmpty
+          ? null
+          : {'token': token},
+    );
+  }
+
+  Future<Uri?> artistArtUri(MusicAssistantProvider provider, ma.Artist artist) async {
+    final directUrl = provider.getImageUrl(artist, size: 256);
+    if (directUrl != null) {
+      return artUri(provider, artist, imageUrl: directUrl);
+    }
+
+    final fallbackUrl = await provider.getArtistImageUrlWithFallback(artist, size: 256);
+    if (fallbackUrl == null) return null;
+    return artUri(provider, artist, imageUrl: fallbackUrl);
   }
 
   // ---------------------------------------------------------------------------
@@ -214,10 +232,10 @@ class AndroidAutoBrowsingDelegate {
       case 'discover-artists':
         var artists = await provider.getDiscoverArtistsWithCache();
         if (artists.isEmpty) artists = SyncService.instance.cachedArtists.take(10).toList();
-        return artists.take(10).map((a) => MediaItem(
+        return Future.wait(artists.take(10).map((a) async => MediaItem(
           id: 'artist|${a.name}', title: a.name,
-          artUri: artUri(provider, a), playable: false,
-        )).toList();
+          artUri: await artistArtUri(provider, a), playable: false,
+        )));
 
       case 'discover-albums':
         final albums = await provider.getDiscoverAlbumsWithCache();
@@ -258,10 +276,10 @@ class AndroidAutoBrowsingDelegate {
 
       case 'favorite-artists':
         final artists = await provider.getFavoriteArtists();
-        return artists.map((a) => MediaItem(
+        return Future.wait(artists.map((a) async => MediaItem(
           id: 'artist|${a.name}', title: a.name,
-          artUri: artUri(provider, a), playable: false,
-        )).toList();
+          artUri: await artistArtUri(provider, a), playable: false,
+        )));
 
       case 'favorite-tracks':
         final tracks = await provider.getFavoriteTracks();
@@ -303,10 +321,10 @@ class AndroidAutoBrowsingDelegate {
 
   Future<List<MediaItem>> buildFavArtists(MusicAssistantProvider provider) async {
     final artists = await provider.getFavoriteArtists();
-    return artists.map((a) => MediaItem(
+    return Future.wait(artists.map((a) async => MediaItem(
       id: 'artist|${a.name}', title: a.name,
-      artUri: artUri(provider, a), playable: false,
-    )).toList();
+      artUri: await artistArtUri(provider, a), playable: false,
+    )));
   }
 
   Future<List<MediaItem>> buildFavAlbums(MusicAssistantProvider provider) async {
@@ -370,10 +388,10 @@ class AndroidAutoBrowsingDelegate {
         ? artists
         : artists.where((a) => alphaKey(a.name) == alphaFilter).toList();
     _logger.log('AndroidAuto: Artists: ${filtered.length}${alphaFilter != null ? ' (filter $alphaFilter)' : ''}');
-    return filtered.map((a) => MediaItem(
+    return Future.wait(filtered.map((a) async => MediaItem(
       id: 'artist|${a.name}', title: a.name,
-      artUri: artUri(provider, a), playable: false,
-    )).toList();
+      artUri: await artistArtUri(provider, a), playable: false,
+    )));
   }
 
   Future<List<MediaItem>> buildArtistAlbums(
