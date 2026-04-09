@@ -217,17 +217,26 @@ class ConnectionProvider with ChangeNotifier {
       if (hasExplicitServerUrl) {
         _serverUrl = normalizedServerUrl;
         await SettingsService.setServerUrl(normalizedServerUrl!);
-      } else {
+      } else if (!wantsWebRtc) {
         _serverUrl ??= await SettingsService.getServerUrl();
       }
+      // In WebRTC mode without an explicit URL, never use the saved direct-mode
+      // server URL as the effective base — it would contaminate the
+      // HttpEndpointResolver and generate imageproxy URLs against a stale host.
 
       final effectiveServerUrl = hasExplicitServerUrl
           ? normalizedServerUrl!
-          : (_serverUrl?.isNotEmpty == true
-              ? _serverUrl!
-              : _webRtcBootstrapServerUrl);
+          : wantsWebRtc
+              ? _webRtcBootstrapServerUrl
+              : (_serverUrl?.isNotEmpty == true
+                  ? _serverUrl!
+                  : _webRtcBootstrapServerUrl);
 
-      _serverUrl = effectiveServerUrl;
+      // Only persist the active URL for direct mode; WebRTC keeps _serverUrl
+      // for potential fallback to direct mode without forgetting the saved host.
+      if (!wantsWebRtc) {
+        _serverUrl = effectiveServerUrl;
+      }
 
       // Dispose old API to stop pending reconnects
       _api?.dispose();
