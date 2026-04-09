@@ -121,7 +121,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final password = _passwordController.text.trim();
 
     // Validate inputs
-    if (serverInput.isEmpty) {
+    if (!_useWebRtc && serverInput.isEmpty) {
       setState(() => _error = S.of(context)!.pleaseEnterServerAddress);
       return;
     }
@@ -145,8 +145,11 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final serverUrl = _buildServerUrl(serverInput);
-      _logger.log('Connecting to: $serverUrl');
+      final serverUrl = serverInput.isEmpty ? null : _buildServerUrl(serverInput);
+      _logger.log(
+        'Connecting using ${_useWebRtc ? 'WebRTC' : 'direct'} mode'
+        '${serverUrl != null ? ' to: $serverUrl' : ''}',
+      );
 
       final provider = context.read<MusicAssistantProvider>();
 
@@ -193,7 +196,9 @@ class _LoginScreenState extends State<LoginScreen> {
       // Save credentials
       await SettingsService.setUsername(username);
       await SettingsService.setPassword(password);
-      await SettingsService.setServerUrl(serverUrl);
+      if (serverUrl != null) {
+        await SettingsService.setServerUrl(serverUrl);
+      }
 
       // Save auth credentials to settings
       await SettingsService.setAuthCredentials({
@@ -275,39 +280,40 @@ class _LoginScreenState extends State<LoginScreen> {
 
               const SizedBox(height: 48),
 
-              // Server URL
-              Text(
-                S.of(context)!.serverAddress,
-                style: textTheme.titleMedium?.copyWith(
-                  color: colorScheme.onBackground,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(height: 12),
-
-              TextField(
-                controller: _serverUrlController,
-                style: TextStyle(color: colorScheme.onSurface),
-                decoration: InputDecoration(
-                  hintText: S.of(context)!.serverAddressHint,
-                  hintStyle: TextStyle(color: colorScheme.onSurface.withOpacity(0.38)),
-                  filled: true,
-                  fillColor: colorScheme.surfaceVariant.withOpacity(0.3),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                  prefixIcon: Icon(
-                    Icons.dns_rounded,
-                    color: colorScheme.onSurface.withOpacity(0.54),
+              if (!_useWebRtc) ...[
+                Text(
+                  S.of(context)!.serverAddress,
+                  style: textTheme.titleMedium?.copyWith(
+                    color: colorScheme.onBackground,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
-                enabled: !_isConnecting,
-                keyboardType: TextInputType.url,
-                textInputAction: TextInputAction.next,
-              ),
+                const SizedBox(height: 12),
 
-              const SizedBox(height: 24),
+                TextField(
+                  controller: _serverUrlController,
+                  style: TextStyle(color: colorScheme.onSurface),
+                  decoration: InputDecoration(
+                    hintText: S.of(context)!.serverAddressHint,
+                    hintStyle: TextStyle(color: colorScheme.onSurface.withOpacity(0.38)),
+                    filled: true,
+                    fillColor: colorScheme.surfaceVariant.withOpacity(0.3),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    prefixIcon: Icon(
+                      Icons.dns_rounded,
+                      color: colorScheme.onSurface.withOpacity(0.54),
+                    ),
+                  ),
+                  enabled: !_isConnecting,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.next,
+                ),
+
+                const SizedBox(height: 24),
+              ],
 
               Row(
                 children: [

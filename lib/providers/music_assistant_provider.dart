@@ -922,6 +922,8 @@ class MusicAssistantProvider with ChangeNotifier {
   Future<void> _initialize() async {
     final serverUrl = await SettingsService.getServerUrl();
     await _connectionProvider.loadConnectionPreferences();
+    final hasActiveConnectionProfile =
+        await SettingsService.getHasActiveConnectionProfile();
 
     // Load cached players from database for instant display (before connecting)
     await _loadPlayersFromDatabase();
@@ -941,7 +943,7 @@ class MusicAssistantProvider with ChangeNotifier {
     // Initialize offline action queue
     await OfflineActionQueue.instance.initialize();
 
-    if (serverUrl != null && serverUrl.isNotEmpty) {
+    if (hasActiveConnectionProfile) {
       await _connectionProvider.restoreAuth();
       await connectToServer(serverUrl);
       await _initializeLocalPlayback();
@@ -1163,7 +1165,7 @@ class MusicAssistantProvider with ChangeNotifier {
   // ============================================================================
 
   /// Delegate to ConnectionProvider. All connection/auth logic lives there.
-  Future<void> connectToServer(String serverUrl) =>
+  Future<void> connectToServer(String? serverUrl) =>
       _connectionProvider.connect(serverUrl);
 
     Future<void> setPreferredConnectionMode(String mode) =>

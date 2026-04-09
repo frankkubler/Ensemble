@@ -192,6 +192,25 @@ class SettingsService {
     await prefs.remove(_keyServerUrl);
   }
 
+  static Future<bool> getHasDirectConnectionProfile() async {
+    final serverUrl = await getServerUrl();
+    return serverUrl != null && serverUrl.isNotEmpty;
+  }
+
+  static Future<bool> getHasWebRtcConnectionProfile() async {
+    final webRtcEnabled = await getWebRtcEnabled();
+    final remoteId = await getWebRtcRemoteId();
+    return webRtcEnabled && remoteId != null && remoteId.isNotEmpty;
+  }
+
+  static Future<bool> getHasActiveConnectionProfile() async {
+    final preferredMode = await getPreferredConnectionMode();
+    if (preferredMode == 'webrtc') {
+      return getHasWebRtcConnectionProfile();
+    }
+    return getHasDirectConnectionProfile();
+  }
+
   static Future<String> getPreferredConnectionMode() async {
     return await _getString(
           _keyPreferredConnectionMode,

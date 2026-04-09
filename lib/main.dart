@@ -504,7 +504,7 @@ class AppStartup extends StatefulWidget {
 
 class _AppStartupState extends State<AppStartup> {
   bool _isConnecting = false;
-  String? _savedServerUrl;
+  bool _hasActiveConnectionProfile = false;
   bool _connectionAttempted = false;
 
   // Welcome system state - loaded FIRST before connection check
@@ -538,19 +538,29 @@ class _AppStartupState extends State<AppStartup> {
 
   Future<void> _checkAndConnect() async {
     final serverUrl = await SettingsService.getServerUrl();
+    final preferredMode = await SettingsService.getPreferredConnectionMode();
+    final webRtcEnabled = await SettingsService.getWebRtcEnabled();
+    final remoteId = await SettingsService.getWebRtcRemoteId();
+    final hasActiveConnectionProfile =
+        await SettingsService.getHasActiveConnectionProfile();
 
     // DEBUG: Log where server URL is coming from
     _logger.log('🐛 DEBUG: Server URL from SharedPreferences: $serverUrl');
+    _logger.log(
+      '🐛 DEBUG: Connection profile mode=$preferredMode '
+      'webRtcEnabled=$webRtcEnabled '
+      'remoteIdPresent=${remoteId != null && remoteId.isNotEmpty}',
+    );
 
     if (!mounted) return;
 
     setState(() {
-      _savedServerUrl = serverUrl;
+      _hasActiveConnectionProfile = hasActiveConnectionProfile;
     });
 
-    // If we have a saved server URL, attempt auto-connection
-    if (serverUrl != null && serverUrl.isNotEmpty) {
-      _logger.log('🐛 DEBUG: Auto-connecting because server URL exists');
+    // If we have an active connection profile, attempt auto-connection
+    if (hasActiveConnectionProfile) {
+      _logger.log('🐛 DEBUG: Auto-connecting because active connection profile exists');
       setState(() {
         _isConnecting = true;
       });
@@ -559,7 +569,10 @@ class _AppStartupState extends State<AppStartup> {
 
       // Connection is handled by MusicAssistantProvider._initialize()
       // Just wait for it to complete or timeout
-      _logger.log('🚀 AppStartup: Waiting for provider auto-connection to $serverUrl');
+      _logger.log(
+        '🚀 AppStartup: Waiting for provider auto-connection using '
+        '$preferredMode profile',
+      );
 
       // For first-time users, we need to wait for both connection AND player selection
       // so the welcome overlay can appear immediately without home screen flash.
@@ -636,9 +649,6 @@ class _AppStartupState extends State<AppStartup> {
       );
     }
 
-    // If server URL is saved, go to home screen
-    // Otherwise, show login screen
-    final hasServerUrl = _savedServerUrl != null && _savedServerUrl!.isNotEmpty;
-    return hasServerUrl ? const HomeScreen() : const LoginScreen();
+    return _hasActiveConnectionProfile ? const HomeScreen() : const LoginScreen();
   }
 }

@@ -26,6 +26,9 @@ typedef OnReadyForInit = Future<void> Function();
 /// MAP holds a [ConnectionProvider], wires its callbacks and exposes
 /// delegating getters so all existing consumers remain unchanged.
 class ConnectionProvider with ChangeNotifier {
+  static const String _webRtcBootstrapServerUrl =
+      'https://remote.music-assistant.invalid';
+
   final DebugLogger _logger = DebugLogger();
   final AuthManager _authManager = AuthManager();
 
@@ -65,6 +68,14 @@ class ConnectionProvider with ChangeNotifier {
   String get preferredConnectionMode => _preferredConnectionMode;
   bool get webRtcEnabled => _webRtcEnabled;
   String? get webRtcRemoteId => _webRtcRemoteId;
+  bool get hasDirectConnectionProfile =>
+      _serverUrl != null && _serverUrl!.isNotEmpty;
+  bool get hasWebRtcConnectionProfile =>
+      _webRtcEnabled && _webRtcRemoteId != null && _webRtcRemoteId!.isNotEmpty;
+  bool get hasActiveConnectionProfile =>
+      _preferredConnectionMode == 'webrtc'
+          ? hasWebRtcConnectionProfile
+          : hasDirectConnectionProfile;
 
   bool get isConnected =>
       _connectionState == MAConnectionState.connected ||
@@ -78,6 +89,7 @@ class ConnectionProvider with ChangeNotifier {
   // ============================================================================
 
   Future<void> loadConnectionPreferences() async {
+    _serverUrl = await SettingsService.getServerUrl();
     _preferredConnectionMode = await SettingsService.getPreferredConnectionMode();
     _webRtcEnabled = await SettingsService.getWebRtcEnabled();
     _webRtcRemoteId = await SettingsService.getWebRtcRemoteId();
@@ -184,11 +196,9 @@ class ConnectionProvider with ChangeNotifier {
   // ============================================================================
 
   /// Connect to the Music Assistant server.
-  Future<void> connect(String serverUrl) async {
+  Future<void> connect(String? serverUrl) async {
     try {
       _error = null;
-      _serverUrl = serverUrl;
-      await SettingsService.setServerUrl(serverUrl);
 
       final wantsWebRtc =
           _webRtcEnabled &&
@@ -196,15 +206,38 @@ class ConnectionProvider with ChangeNotifier {
           _webRtcRemoteId != null &&
           _webRtcRemoteId!.isNotEmpty;
 
+      final normalizedServerUrl = serverUrl?.trim();
+      final hasExplicitServerUrl =
+          normalizedServerUrl != null && normalizedServerUrl.isNotEmpty;
+
+      if (!wantsWebRtc && !hasExplicitServerUrl) {
+        throw ArgumentError('serverUrl is required for direct connection mode');
+      }
+
+      if (hasExplicitServerUrl) {
+        _serverUrl = normalizedServerUrl;
+        await SettingsService.setServerUrl(normalizedServerUrl!);
+      } else {
+        _serverUrl ??= await SettingsService.getServerUrl();
+      }
+
+      final effectiveServerUrl = hasExplicitServerUrl
+          ? normalizedServerUrl!
+          : (_serverUrl?.isNotEmpty == true
+              ? _serverUrl!
+              : _webRtcBootstrapServerUrl);
+
+      _serverUrl = effectiveServerUrl;
+
       // Dispose old API to stop pending reconnects
       _api?.dispose();
 
       _api = MusicAssistantAPI(
-        serverUrl,
+        effectiveServerUrl,
         _authManager,
         transportBuilder: wantsWebRtc
-        ? (_) => WebRtcApiTransport(remoteId: _webRtcRemoteId!)
-        : null,
+            ? (_) => WebRtcApiTransport(remoteId: _webRtcRemoteId!)
+            : null,
       );
 
       // Notify MAP so it can resubscribe to API event streams
