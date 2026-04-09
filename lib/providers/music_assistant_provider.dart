@@ -31,6 +31,7 @@ import '../services/image_prefetch_service.dart';
 import '../constants/timings.dart';
 import '../services/database_service.dart';
 import '../services/library_status_service.dart';
+import '../services/remote/webrtc_sendspin_transport.dart';
 import '../main.dart' show audioHandler;
 import 'sleep_timer_provider.dart';
 import 'connection_provider.dart';
@@ -2313,11 +2314,23 @@ class MusicAssistantProvider with ChangeNotifier {
     try {
       final serverVersion = _getServerVersionString();
       final hasProxy = _serverHasSendspinProxy();
+      final wantsWebRtc =
+          _connectionProvider.webRtcEnabled &&
+          _connectionProvider.preferredConnectionMode == 'webrtc' &&
+          _connectionProvider.webRtcRemoteId != null &&
+          _connectionProvider.webRtcRemoteId!.isNotEmpty;
       _logger.log('Sendspin: Server version $serverVersion, has proxy: $hasProxy');
 
       // Initialize Sendspin service
       _sendspinService?.dispose();
-      _sendspinService = SendspinService(_serverUrl!);
+      _sendspinService = SendspinService(
+        _serverUrl!,
+        transportBuilder: wantsWebRtc
+            ? () => WebRtcSendspinTransport(
+                  remoteId: _connectionProvider.webRtcRemoteId!,
+                )
+            : null,
+      );
 
       // Set auth token for proxy authentication (MA 2.7.1+ or manually configured proxy)
       final authToken = await SettingsService.getMaAuthToken();
@@ -2346,6 +2359,19 @@ class MusicAssistantProvider with ChangeNotifier {
       _sendspinService!.onVolume = _handleSendspinVolume;
       _sendspinService!.onStreamStart = _handleSendspinStreamStart;
       _sendspinService!.onStreamEnd = _handleSendspinStreamEnd;
+
+      if (wantsWebRtc) {
+        _logger.log('Sendspin: WebRTC mode enabled, trying sendspin data channel');
+        final connected = await _sendspinService!.connect();
+        if (connected) {
+          _sendspinConnected = true;
+          _logger.log('✅ Sendspin: Connected via WebRTC data channel');
+          return true;
+        }
+
+        _logger.log('⚠️ Sendspin: WebRTC data channel connection failed');
+        return false;
+      }
 
       final playerId = await DeviceIdService.getOrCreateDevicePlayerId();
       _logger.log('Sendspin: Player ID: $playerId');

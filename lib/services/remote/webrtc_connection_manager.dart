@@ -17,25 +17,33 @@ enum WebRtcConnectionState {
 class WebRtcConnectionManager {
   WebRtcConnectionManager({
     required this.remoteId,
+    this.enableApiChannel = true,
+    this.enableSendspinChannel = false,
     SignalingClient? signalingClient,
   }) : _signalingClient = signalingClient ?? SignalingClient();
 
   final String remoteId;
+  final bool enableApiChannel;
+  final bool enableSendspinChannel;
   final SignalingClient _signalingClient;
 
   final _stateController = StreamController<WebRtcConnectionState>.broadcast();
   final _messageController = StreamController<dynamic>.broadcast();
+  final _sendspinMessageController = StreamController<dynamic>.broadcast();
 
   StreamSubscription<Map<String, dynamic>>? _signalingSubscription;
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _apiChannel;
+  RTCDataChannel? _sendspinChannel;
   Completer<void>? _connectCompleter;
   String? _sessionId;
   bool _disposed = false;
   WebRtcConnectionState _state = WebRtcConnectionState.idle;
+  final Set<String> _openChannels = <String>{};
 
   Stream<WebRtcConnectionState> get connectionState => _stateController.stream;
   Stream<dynamic> get messages => _messageController.stream;
+  Stream<dynamic> get sendspinMessages => _sendspinMessageController.stream;
   WebRtcConnectionState get currentState => _state;
   bool get isConnected => _state == WebRtcConnectionState.connected;
 
@@ -73,6 +81,15 @@ class WebRtcConnectionManager {
     channel.send(RTCDataChannelMessage(message));
   }
 
+  Future<void> sendSendspinMessage(String message) async {
+    final channel = _sendspinChannel;
+    if (channel == null || channel.state != RTCDataChannelState.RTCDataChannelOpen) {
+      throw StateError('WebRTC Sendspin channel is not open');
+    }
+
+    channel.send(RTCDataChannelMessage(message));
+  }
+
   Future<void> disconnect() async {
     await _signalingSubscription?.cancel();
     _signalingSubscription = null;
@@ -80,8 +97,13 @@ class WebRtcConnectionManager {
     await _apiChannel?.close();
     _apiChannel = null;
 
+    await _sendspinChannel?.close();
+    _sendspinChannel = null;
+
     await _peerConnection?.close();
     _peerConnection = null;
+
+    _openChannels.clear();
 
     await _signalingClient.disconnect();
     if (!_disposed) {
@@ -94,6 +116,7 @@ class WebRtcConnectionManager {
     disconnect();
     _stateController.close();
     _messageController.close();
+    _sendspinMessageController.close();
     _signalingClient.dispose();
   }
 
@@ -129,8 +152,11 @@ class WebRtcConnectionManager {
     };
 
     _peerConnection!.onDataChannel = (channel) {
-      if (channel.label == 'ma-api' || channel.label.isEmpty) {
+      final label = channel.label;
+      if ((label == 'ma-api' || (label?.isEmpty ?? false)) && enableApiChannel) {
         _bindApiChannel(channel);
+      } else if (label == 'sendspin' && enableSendspinChannel) {
+        _bindSendspinChannel(channel);
       }
     };
 
@@ -142,11 +168,21 @@ class WebRtcConnectionManager {
       }
     };
 
-    final apiChannel = await _peerConnection!.createDataChannel(
-      'ma-api',
-      RTCDataChannelInit()..ordered = true,
-    );
-    _bindApiChannel(apiChannel);
+    if (enableApiChannel) {
+      final apiChannel = await _peerConnection!.createDataChannel(
+        'ma-api',
+        RTCDataChannelInit()..ordered = true,
+      );
+      _bindApiChannel(apiChannel);
+    }
+
+    if (enableSendspinChannel) {
+      final sendspinChannel = await _peerConnection!.createDataChannel(
+        'sendspin',
+        RTCDataChannelInit()..ordered = true,
+      );
+      _bindSendspinChannel(sendspinChannel);
+    }
 
     final offer = await _peerConnection!.createOffer({
       'offerToReceiveAudio': false,
@@ -215,12 +251,9 @@ class WebRtcConnectionManager {
     _apiChannel = channel;
     channel.onDataChannelState = (state) {
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
-        _setState(WebRtcConnectionState.connected);
-        if (_connectCompleter != null && !_connectCompleter!.isCompleted) {
-          _connectCompleter!.complete();
-        }
+        _markChannelOpen('ma-api');
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
-        _setState(WebRtcConnectionState.disconnected);
+        _markChannelClosed('ma-api');
       }
     };
 
@@ -235,6 +268,55 @@ class WebRtcConnectionManager {
         _messageController.add(message.text);
       }
     };
+  }
+
+  void _bindSendspinChannel(RTCDataChannel channel) {
+    _sendspinChannel = channel;
+    channel.onDataChannelState = (state) {
+      if (state == RTCDataChannelState.RTCDataChannelOpen) {
+        _markChannelOpen('sendspin');
+      } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
+        _markChannelClosed('sendspin');
+      }
+    };
+
+    channel.onMessage = (message) {
+      if (_sendspinMessageController.isClosed) {
+        return;
+      }
+
+      if (message.isBinary) {
+        _sendspinMessageController.add(message.binary);
+      } else {
+        _sendspinMessageController.add(message.text);
+      }
+    };
+  }
+
+  void _markChannelOpen(String label) {
+    _openChannels.add(label);
+    if (_requiredChannels.every(_openChannels.contains)) {
+      _setState(WebRtcConnectionState.connected);
+      if (_connectCompleter != null && !_connectCompleter!.isCompleted) {
+        _connectCompleter!.complete();
+      }
+    }
+  }
+
+  void _markChannelClosed(String label) {
+    _openChannels.remove(label);
+    _setState(WebRtcConnectionState.disconnected);
+  }
+
+  Set<String> get _requiredChannels {
+    final requiredChannels = <String>{};
+    if (enableApiChannel) {
+      requiredChannels.add('ma-api');
+    }
+    if (enableSendspinChannel) {
+      requiredChannels.add('sendspin');
+    }
+    return requiredChannels;
   }
 
   List<Map<String, dynamic>> _parseIceServers(dynamic rawIceServers) {

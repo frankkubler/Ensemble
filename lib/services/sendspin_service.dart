@@ -1,12 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
-import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:web_socket_channel/io.dart';
 import 'debug_logger.dart';
 import 'settings_service.dart';
 import 'device_id_service.dart';
+import 'remote/sendspin_transport.dart';
+import 'remote/websocket_sendspin_transport.dart';
 
 /// Connection state for Sendspin player
 enum SendspinConnectionState {
@@ -32,12 +31,14 @@ typedef SendspinStreamEndCallback = void Function();
 /// Connection strategy (smart fallback for external access):
 /// 1. If server is HTTPS, try external wss://{server}/sendspin first
 /// 2. Fall back to local_ws_url from API (ws://local-ip:8927/sendspin)
-/// 3. WebRTC fallback as last resort (requires TURN servers)
+/// A custom transport builder can route Sendspin over WebRTC.
 class SendspinService {
   final String serverUrl;
+  final SendspinTransportBuilder? _transportBuilder;
   final _logger = DebugLogger();
 
-  WebSocketChannel? _channel;
+  SendspinTransport? _transport;
+  StreamSubscription<dynamic>? _messageSubscription;
   Timer? _heartbeatTimer;
   Timer? _reconnectTimer;
 
@@ -90,7 +91,8 @@ class SendspinService {
   // Connection deduplication guard - prevents multiple concurrent auth attempts
   Completer<bool>? _connectionInProgress;
 
-  SendspinService(this.serverUrl);
+  SendspinService(this.serverUrl, {SendspinTransportBuilder? transportBuilder})
+      : _transportBuilder = transportBuilder;
 
   /// Set the MA auth token for proxy authentication
   void setAuthToken(String? token) {
@@ -118,6 +120,21 @@ class SendspinService {
       _playerName = await SettingsService.getLocalPlayerName();
 
       _logger.log('Sendspin: Connecting as "$_playerName" (ID: $_playerId)');
+
+      if (_transportBuilder != null) {
+        final connected = await _tryConnectWithTransport();
+        if (!connected) {
+          _logger.log('Sendspin: Custom transport connection failed');
+          _updateState(SendspinConnectionState.error);
+          _connectionInProgress?.complete(false);
+          _connectionInProgress = null;
+          return false;
+        }
+
+        _connectionInProgress?.complete(true);
+        _connectionInProgress = null;
+        return true;
+      }
 
       // Try connection strategies in order
       bool connected = false;
@@ -174,7 +191,9 @@ class SendspinService {
 
       _logger.log('Sendspin: Connecting with URL: $wsUrl');
 
-      final connected = await _tryConnect(wsUrl, timeout: const Duration(seconds: 5), useProxyAuth: useProxyAuth);
+        final connected = _transportBuilder != null
+          ? await _tryConnectWithTransport()
+          : await _tryConnect(wsUrl, timeout: const Duration(seconds: 5), useProxyAuth: useProxyAuth);
 
       if (!connected) {
         _updateState(SendspinConnectionState.error);
@@ -202,14 +221,22 @@ class SendspinService {
       // Connect to the base URL without query params - we send player info in hello message
       _logger.log('Sendspin: Connecting to $url${useProxyAuth ? ' (with proxy auth)' : ''}');
 
-      // Create WebSocket connection
-      final webSocket = await WebSocket.connect(url).timeout(timeout);
+      await _messageSubscription?.cancel();
+      await _transport?.close();
 
-      _channel = IOWebSocketChannel(webSocket);
+      final transport = WebSocketSendspinTransport();
+      await transport.connect(
+        url: url,
+        timeout: timeout,
+        authToken: _authToken,
+        useProxyAuth: useProxyAuth,
+      );
+
+      _transport = transport;
       _connectedUrl = url;
 
       // Set up message listener BEFORE sending hello
-      _channel!.stream.listen(
+      _messageSubscription = transport.messages.listen(
         _handleMessage,
         onError: _handleError,
         onDone: _handleDone,
@@ -231,8 +258,10 @@ class SendspinService {
 
         if (!authOk) {
           _logger.log('Sendspin: Proxy authentication failed or timed out');
-          await _channel?.sink.close();
-          _channel = null;
+          await _messageSubscription?.cancel();
+          _messageSubscription = null;
+          await _transport?.close();
+          _transport = null;
           return false;
         }
         _logger.log('Sendspin: Proxy auth successful, proceeding with hello');
@@ -272,8 +301,10 @@ class SendspinService {
 
       if (!ackReceived) {
         _logger.log('Sendspin: No acknowledgment from server after hello');
-        await _channel?.sink.close();
-        _channel = null;
+        await _messageSubscription?.cancel();
+        _messageSubscription = null;
+        await _transport?.close();
+        _transport = null;
         return false;
       }
 
@@ -284,6 +315,75 @@ class SendspinService {
       return true;
     } catch (e) {
       _logger.log('Sendspin: Connection attempt failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _tryConnectWithTransport() async {
+    try {
+      final builder = _transportBuilder;
+      if (builder == null) {
+        return false;
+      }
+
+      await _messageSubscription?.cancel();
+      await _transport?.close();
+
+      final transport = builder();
+      _logger.log('Sendspin: Connecting via ${transport.label}');
+      await transport.connect(authToken: _authToken);
+      _transport = transport;
+      _connectedUrl = null;
+
+      _messageSubscription = transport.messages.listen(
+        _handleMessage,
+        onError: _handleError,
+        onDone: _handleDone,
+      );
+
+      _logger.log('Sendspin: Sending client/hello with player_id=$_playerId');
+      _sendMessage({
+        'type': 'client/hello',
+        'payload': {
+          'client_id': _playerId,
+          'name': _playerName,
+          'version': 1,
+          'supported_roles': ['player@v1'],
+          'player@v1_support': {
+            'supported_formats': [
+              {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            ],
+            'buffer_capacity': 1048576,
+            'supported_commands': ['volume', 'mute'],
+          },
+        },
+      }, allowDuringHandshake: true);
+
+      final ackReceived = await _waitForAck().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => false,
+      );
+
+      if (!ackReceived) {
+        _logger.log('Sendspin: No acknowledgment from transport after hello');
+        await _messageSubscription?.cancel();
+        _messageSubscription = null;
+        await _transport?.close();
+        _transport = null;
+        return false;
+      }
+
+      _logger.log('Sendspin: Connected and registered successfully via ${transport.label}');
+      _updateState(SendspinConnectionState.connected);
+      _startHeartbeat();
+      return true;
+    } catch (e) {
+      _logger.log('Sendspin: Custom transport connection attempt failed: $e');
       return false;
     }
   }
@@ -517,14 +617,14 @@ class SendspinService {
 
   /// Handle WebSocket errors
   void _handleError(dynamic error) {
-    _logger.log('Sendspin: WebSocket error: $error');
+    _logger.log('Sendspin: Transport error: $error');
     _updateState(SendspinConnectionState.error);
     _scheduleReconnect();
   }
 
   /// Handle WebSocket close
   void _handleDone() {
-    _logger.log('Sendspin: WebSocket closed');
+    _logger.log('Sendspin: Transport closed');
     _updateState(SendspinConnectionState.disconnected);
     _scheduleReconnect();
   }
@@ -532,7 +632,7 @@ class SendspinService {
   /// Send a JSON message to the server
   /// allowDuringHandshake: set to true to send messages before connection is established (e.g., hello)
   void _sendMessage(Map<String, dynamic> message, {bool allowDuringHandshake = false}) {
-    if (_channel == null) return;
+    if (_transport == null) return;
 
     // During handshake, we need to send hello even though state is still 'connecting'
     if (!allowDuringHandshake && _state != SendspinConnectionState.connected) return;
@@ -540,7 +640,7 @@ class SendspinService {
     try {
       final json = jsonEncode(message);
       _logger.debug('Sendspin: Sending message: ${message['type']}');
-      _channel!.sink.add(json);
+      unawaited(_transport!.send(json));
     } catch (e) {
       _logger.log('Sendspin: Error sending message: $e');
     }
@@ -662,7 +762,9 @@ class SendspinService {
     _reconnectTimer = Timer(const Duration(seconds: 5), () {
       if (!_isDisposed && _state != SendspinConnectionState.connected) {
         _logger.log('Sendspin: Attempting reconnection...');
-        if (_connectedUrl != null) {
+        if (_transportBuilder != null) {
+          connect();
+        } else if (_connectedUrl != null) {
           connectWithUrl(_connectedUrl!);
         }
       }
@@ -685,7 +787,7 @@ class SendspinService {
     _stopHeartbeat();
     _reconnectTimer?.cancel();
 
-    if (_channel != null) {
+    if (_transport != null) {
       // Send graceful goodbye per Sendspin protocol
       _sendMessage({
         'type': 'client/goodbye',
@@ -693,8 +795,10 @@ class SendspinService {
           'reason': 'user_request',
         },
       });
-      await _channel!.sink.close();
-      _channel = null;
+      await _messageSubscription?.cancel();
+      _messageSubscription = null;
+      await _transport!.close();
+      _transport = null;
     }
 
     _updateState(SendspinConnectionState.disconnected);
@@ -705,7 +809,8 @@ class SendspinService {
     _isDisposed = true;
     _stopHeartbeat();
     _reconnectTimer?.cancel();
-    _channel?.sink.close();
+    _messageSubscription?.cancel();
+    _transport?.close();
     _stateController.close();
     _audioDataController.close();
   }

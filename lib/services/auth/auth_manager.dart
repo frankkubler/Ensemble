@@ -141,7 +141,7 @@ class AuthManager {
   }
 
   /// Build headers for WebSocket connection
-  Map<String, dynamic> getWebSocketHeaders() {
+  Map<String, String> getWebSocketHeaders() {
     if (token != null) {
       return {'Authorization': 'Bearer $token'};
     }
