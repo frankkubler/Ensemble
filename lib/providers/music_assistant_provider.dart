@@ -212,6 +212,9 @@ class MusicAssistantProvider with ChangeNotifier {
   String? get serverUrl => _connectionProvider.serverUrl;
   String? get error => _error ?? _connectionProvider.error;
   bool get isConnected => _connectionProvider.isConnected;
+  String get preferredConnectionMode => _connectionProvider.preferredConnectionMode;
+  bool get webRtcEnabled => _connectionProvider.webRtcEnabled;
+  String? get webRtcRemoteId => _connectionProvider.webRtcRemoteId;
 
   // Library getters with provider filtering applied
   List<Artist> get artists => filterByProvider(_artists);
@@ -915,6 +918,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
   Future<void> _initialize() async {
     final serverUrl = await SettingsService.getServerUrl();
+    await _connectionProvider.loadConnectionPreferences();
 
     // Load cached players from database for instant display (before connecting)
     await _loadPlayersFromDatabase();
@@ -1158,6 +1162,15 @@ class MusicAssistantProvider with ChangeNotifier {
   /// Delegate to ConnectionProvider. All connection/auth logic lives there.
   Future<void> connectToServer(String serverUrl) =>
       _connectionProvider.connect(serverUrl);
+
+    Future<void> setPreferredConnectionMode(String mode) =>
+      _connectionProvider.setPreferredConnectionMode(mode);
+
+    Future<void> setWebRtcEnabled(bool enabled) =>
+      _connectionProvider.setWebRtcEnabled(enabled);
+
+    Future<void> setWebRtcRemoteId(String? remoteId) =>
+      _connectionProvider.setWebRtcRemoteId(remoteId);
 
   /// Called by ConnectionProvider.onApiCreated when a new API instance is created.
   /// Resubscribes MAP's event handlers to the new API streams.

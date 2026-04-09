@@ -16,6 +16,8 @@ import 'settings_service.dart';
 import 'device_id_service.dart';
 import 'retry_helper.dart';
 import 'auth/auth_manager.dart';
+import 'remote/direct_ws_transport.dart';
+import 'remote/ma_connection_transport.dart';
 
 enum MAConnectionState {
   disconnected,
@@ -29,9 +31,12 @@ enum MAConnectionState {
 class MusicAssistantAPI {
   final String serverUrl;
   final AuthManager authManager;
-  WebSocketChannel? _channel;
   final _uuid = const Uuid();
   final _logger = DebugLogger();
+  final MAConnectionTransportBuilder? _transportBuilder;
+
+  MAConnectionTransport? _transport;
+  StreamSubscription? _transportSubscription;
 
   final _connectionStateController = StreamController<MAConnectionState>.broadcast();
   Stream<MAConnectionState> get connectionState => _connectionStateController.stream;
@@ -66,7 +71,11 @@ class MusicAssistantAPI {
   final Map<String, ProviderManifest> _providerManifests = {};
   Map<String, ProviderManifest> get providerManifests => _providerManifests;
 
-  MusicAssistantAPI(this.serverUrl, this.authManager);
+  MusicAssistantAPI(
+    this.serverUrl,
+    this.authManager, {
+    MAConnectionTransportBuilder? transportBuilder,
+  }) : _transportBuilder = transportBuilder;
 
   /// Check if a URL string has an explicit port (e.g., ":80", ":8095").
   /// Dart's Uri.hasPort returns false for default ports (80/443) even when
@@ -203,26 +212,41 @@ class MusicAssistantAPI {
         _logger.log('Connection: No authentication configured');
       }
 
-      // Use WebSocket.connect with headers, then wrap in IOWebSocketChannel
-      final webSocket = await WebSocket.connect(
-        wsUrl,
-        headers: headers.isNotEmpty ? headers : null,
+      await _transportSubscription?.cancel();
+      _transportSubscription = null;
+      await _transport?.close();
+
+      final context = MAConnectionContext(
+        endpoint: wsUrl,
+        originalServerUrl: serverUrl,
+        clientId: clientId,
+        headers: headers,
+        metadata: {
+          'mode': MAConnectionMode.direct.name,
+          'secure': useSecure,
+          'custom_port': _cachedCustomPort,
+        },
       );
-      _channel = IOWebSocketChannel(webSocket);
+
+      final transport = _transportBuilder?.call(context) ?? DirectWsTransport();
+      await transport.connect(context);
+      _transport = transport;
+
+      _logger.log('Connection: Transport ready (${transport.label})');
 
       // Wait for server info message before considering connected
       _connectionCompleter = Completer<void>();
 
       // Listen to messages
-      _channel!.stream.listen(
+      _transportSubscription = _transport!.messages.listen(
         _handleMessage,
         onError: (error) {
-          _logger.log('WebSocket error: $error');
+          _logger.log('Transport error (${_transport?.label}): $error');
           _updateConnectionState(MAConnectionState.error);
           _reconnect();
         },
         onDone: () {
-          _logger.log('WebSocket connection closed');
+          _logger.log('Transport closed (${_transport?.label})');
           _isAuthenticated = false; // Reset auth state on disconnect
           _updateConnectionState(MAConnectionState.disconnected);
           if (_connectionCompleter != null && !_connectionCompleter!.isCompleted) {
@@ -248,6 +272,10 @@ class MusicAssistantAPI {
     } catch (e) {
       _logger.log('Connection: Failed - $e');
       _updateConnectionState(MAConnectionState.error);
+      await _transportSubscription?.cancel();
+      _transportSubscription = null;
+      await _transport?.close();
+      _transport = null;
       if (_connectionInProgress != null && !_connectionInProgress!.isCompleted) {
         _connectionInProgress!.completeError(e);
       }
@@ -394,7 +422,13 @@ class MusicAssistantAPI {
       if (args != null) 'args': args,
     };
 
-    _channel!.sink.add(jsonEncode(message));
+    final transport = _transport;
+    if (transport == null) {
+      _pendingRequests.remove(messageId);
+      throw Exception('No active connection transport');
+    }
+
+    await transport.send(jsonEncode(message));
 
     // Timeout after configured duration, ensure cleanup in all cases
     try {
@@ -3731,8 +3765,10 @@ class MusicAssistantAPI {
   Future<void> disconnect() async {
     _stopHeartbeat();
     _updateConnectionState(MAConnectionState.disconnected);
-    await _channel?.sink.close();
-    _channel = null;
+    await _transportSubscription?.cancel();
+    _transportSubscription = null;
+    await _transport?.close();
+    _transport = null;
     // Complete all pending requests with an error before clearing
     _cancelPendingRequests('Connection disconnected');
   }

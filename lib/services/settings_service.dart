@@ -73,6 +73,9 @@ class SettingsService {
   static const String _keyServerUrl = 'server_url';
   static const String _keyAuthServerUrl = 'auth_server_url';
   static const String _keyWebSocketPort = 'websocket_port';
+  static const String _keyPreferredConnectionMode = 'preferred_connection_mode';
+  static const String _keyWebRtcEnabled = 'webrtc_enabled';
+  static const String _keyWebRtcRemoteId = 'webrtc_remote_id';
   static const String _keyAuthToken = 'auth_token';
   static const String _keyMaAuthToken = 'ma_auth_token'; // Music Assistant native auth token
   static const String _keyAuthCredentials = 'auth_credentials'; // NEW: Serialized auth strategy credentials
@@ -187,6 +190,38 @@ class SettingsService {
   static Future<void> clearServerUrl() async {
     final prefs = await _getPrefs();
     await prefs.remove(_keyServerUrl);
+  }
+
+  static Future<String> getPreferredConnectionMode() async {
+    return await _getString(
+          _keyPreferredConnectionMode,
+          defaultValue: 'direct',
+        ) ??
+        'direct';
+  }
+
+  static Future<void> setPreferredConnectionMode(String mode) async {
+    await _setString(_keyPreferredConnectionMode, mode);
+  }
+
+  static Future<bool> getWebRtcEnabled() async {
+    return _getBool(_keyWebRtcEnabled);
+  }
+
+  static Future<void> setWebRtcEnabled(bool enabled) async {
+    await _setBool(_keyWebRtcEnabled, enabled);
+  }
+
+  static Future<String?> getWebRtcRemoteId() async {
+    return _getString(_keyWebRtcRemoteId);
+  }
+
+  static Future<void> setWebRtcRemoteId(String? remoteId) async {
+    await _setString(
+      _keyWebRtcRemoteId,
+      remoteId?.trim().toUpperCase(),
+      removeIfEmpty: true,
+    );
   }
 
   // Get authentication server URL (returns null if not set, meaning use server URL)

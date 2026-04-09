@@ -32,6 +32,9 @@ class ConnectionProvider with ChangeNotifier {
   String? _serverUrl;
   String? _error;
   MAConnectionState _connectionState = MAConnectionState.disconnected;
+  String _preferredConnectionMode = 'direct';
+  bool _webRtcEnabled = false;
+  String? _webRtcRemoteId;
 
   StreamSubscription? _connectionStateSubscription;
 
@@ -58,6 +61,9 @@ class ConnectionProvider with ChangeNotifier {
   String? get serverUrl => _serverUrl;
   String? get error => _error;
   MAConnectionState get connectionState => _connectionState;
+  String get preferredConnectionMode => _preferredConnectionMode;
+  bool get webRtcEnabled => _webRtcEnabled;
+  String? get webRtcRemoteId => _webRtcRemoteId;
 
   bool get isConnected =>
       _connectionState == MAConnectionState.connected ||
@@ -69,6 +75,31 @@ class ConnectionProvider with ChangeNotifier {
   // ============================================================================
   // AUTH HELPERS
   // ============================================================================
+
+  Future<void> loadConnectionPreferences() async {
+    _preferredConnectionMode = await SettingsService.getPreferredConnectionMode();
+    _webRtcEnabled = await SettingsService.getWebRtcEnabled();
+    _webRtcRemoteId = await SettingsService.getWebRtcRemoteId();
+    notifyListeners();
+  }
+
+  Future<void> setPreferredConnectionMode(String mode) async {
+    _preferredConnectionMode = mode;
+    await SettingsService.setPreferredConnectionMode(mode);
+    notifyListeners();
+  }
+
+  Future<void> setWebRtcEnabled(bool enabled) async {
+    _webRtcEnabled = enabled;
+    await SettingsService.setWebRtcEnabled(enabled);
+    notifyListeners();
+  }
+
+  Future<void> setWebRtcRemoteId(String? remoteId) async {
+    _webRtcRemoteId = remoteId?.trim().toUpperCase();
+    await SettingsService.setWebRtcRemoteId(_webRtcRemoteId);
+    notifyListeners();
+  }
 
   /// Pre-load a stored token into the auth manager before the first [connect()].
   Future<void> restoreAuth() async {
@@ -145,6 +176,19 @@ class ConnectionProvider with ChangeNotifier {
       _error = null;
       _serverUrl = serverUrl;
       await SettingsService.setServerUrl(serverUrl);
+
+      final wantsWebRtc =
+          _webRtcEnabled &&
+          _preferredConnectionMode == 'webrtc' &&
+          _webRtcRemoteId != null &&
+          _webRtcRemoteId!.isNotEmpty;
+
+      if (wantsWebRtc) {
+        _logger.log(
+          'WebRTC is enabled and preferred for remote ID $_webRtcRemoteId, '
+          'but session transport is not wired yet. Falling back to direct transport.',
+        );
+      }
 
       // Dispose old API to stop pending reconnects
       _api?.dispose();
