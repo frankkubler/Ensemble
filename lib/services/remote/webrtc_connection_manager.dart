@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../debug_logger.dart';
 import 'signaling_client.dart';
 
 enum WebRtcConnectionState {
@@ -26,6 +27,7 @@ class WebRtcConnectionManager {
   final bool enableApiChannel;
   final bool enableSendspinChannel;
   final SignalingClient _signalingClient;
+  final DebugLogger _logger = DebugLogger();
 
   final _stateController = StreamController<WebRtcConnectionState>.broadcast();
   final _messageController = StreamController<dynamic>.broadcast();
@@ -65,11 +67,13 @@ class WebRtcConnectionManager {
 
     _setState(WebRtcConnectionState.connecting);
     _connectCompleter = Completer<void>();
+    _logger.log('WebRTC [$remoteId]: connecting to signaling server');
 
     await _signalingClient.connect();
     await _signalingSubscription?.cancel();
     _signalingSubscription =
         _signalingClient.messages.listen(_handleSignalingMessage);
+    _logger.log('WebRTC [$remoteId]: signaling connected, sending connect-request');
     await _signalingClient.sendConnectRequest(_normalizedRemoteId);
 
     await _connectCompleter!.future.timeout(
@@ -97,6 +101,7 @@ class WebRtcConnectionManager {
   }
 
   Future<void> disconnect() async {
+    _logger.log('WebRTC [$remoteId]: disconnect requested');
     await _signalingSubscription?.cancel();
     _signalingSubscription = null;
 
@@ -135,6 +140,10 @@ class WebRtcConnectionManager {
     _sessionId = (message['sessionId'] ?? message['session_id']) as String?;
     final iceServers =
         _parseIceServers(message['iceServers'] ?? message['ice_servers']);
+    _logger.log(
+      'WebRTC [$remoteId]: session ready '
+      'sessionId=${_sessionId ?? 'unknown'} iceServers=${iceServers.length}',
+    );
 
     _peerConnection = await createPeerConnection({
       'iceServers': iceServers,
@@ -163,6 +172,7 @@ class WebRtcConnectionManager {
 
     _peerConnection!.onDataChannel = (channel) {
       final label = channel.label;
+      _logger.log('WebRTC [$remoteId]: remote data channel received label=$label');
       if ((label == 'ma-api' || (label?.isEmpty ?? false)) && enableApiChannel) {
         _bindApiChannel(channel);
       } else if (label == 'sendspin' && enableSendspinChannel) {
@@ -171,28 +181,21 @@ class WebRtcConnectionManager {
     };
 
     _peerConnection!.onConnectionState = (state) {
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _logger.warning('WebRTC [$remoteId]: ICE connection failed');
+        if (_connectCompleter != null && !_connectCompleter!.isCompleted) {
+          _connectCompleter!.completeError(Exception('WebRTC ICE connection failed'));
+        }
+        _setState(WebRtcConnectionState.error);
+      } else if (state ==
+              RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         _setState(WebRtcConnectionState.disconnected);
       }
     };
 
-    if (enableApiChannel) {
-      final apiChannel = await _peerConnection!.createDataChannel(
-        'ma-api',
-        RTCDataChannelInit()..ordered = true,
-      );
-      _bindApiChannel(apiChannel);
-    }
-
-    if (enableSendspinChannel) {
-      final sendspinChannel = await _peerConnection!.createDataChannel(
-        'sendspin',
-        RTCDataChannelInit()..ordered = true,
-      );
-      _bindSendspinChannel(sendspinChannel);
-    }
+    // NOTE: data channels are created by the gateway (server-initiates).
+    // Do NOT call createDataChannel() here — the channels arrive via onDataChannel.
 
     final offer = await _peerConnection!.createOffer({
       'offerToReceiveAudio': false,
@@ -220,9 +223,11 @@ class WebRtcConnectionManager {
     switch (type) {
       case 'connected':
       case 'session-ready':
+        _logger.log('WebRTC [$remoteId]: signaling type=$type received');
         await _handleConnectedMessage(message);
         break;
       case 'answer':
+        _logger.log('WebRTC [$remoteId]: SDP answer received');
         final data = message['data'] as Map<String, dynamic>?;
         final sdp = data?['sdp'] as String?;
         final answerType = (data?['type'] as String?) ?? 'answer';
@@ -233,6 +238,7 @@ class WebRtcConnectionManager {
         }
         break;
       case 'ice-candidate':
+        _logger.debug('WebRTC [$remoteId]: remote ICE candidate received');
         final data = message['data'] as Map<String, dynamic>?;
         final candidate = data?['candidate'] as String?;
         if (_peerConnection != null && candidate != null) {
@@ -248,6 +254,7 @@ class WebRtcConnectionManager {
       case 'error':
       case 'client-disconnected':
       case 'peer-disconnected':
+        _logger.warning('WebRTC [$remoteId]: signaling error type=$type msg=$message');
         _setState(WebRtcConnectionState.error);
         if (_connectCompleter != null && !_connectCompleter!.isCompleted) {
           _connectCompleter!.completeError(
@@ -260,6 +267,7 @@ class WebRtcConnectionManager {
 
   void _bindApiChannel(RTCDataChannel channel) {
     _apiChannel = channel;
+    _logger.log('WebRTC [$remoteId]: binding API channel label=${channel.label}');
     channel.onDataChannelState = (state) {
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
         _markChannelOpen('ma-api');
@@ -279,10 +287,16 @@ class WebRtcConnectionManager {
         _messageController.add(message.text);
       }
     };
+
+    // Channel may already be OPEN when onDataChannel fires (WebRTC spec).
+    if (channel.state == RTCDataChannelState.RTCDataChannelOpen) {
+      _markChannelOpen('ma-api');
+    }
   }
 
   void _bindSendspinChannel(RTCDataChannel channel) {
     _sendspinChannel = channel;
+    _logger.log('WebRTC [$remoteId]: binding Sendspin channel label=${channel.label}');
     channel.onDataChannelState = (state) {
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
         _markChannelOpen('sendspin');
@@ -302,10 +316,19 @@ class WebRtcConnectionManager {
         _sendspinMessageController.add(message.text);
       }
     };
+
+    // Channel may already be OPEN when onDataChannel fires (WebRTC spec).
+    if (channel.state == RTCDataChannelState.RTCDataChannelOpen) {
+      _markChannelOpen('sendspin');
+    }
   }
 
   void _markChannelOpen(String label) {
     _openChannels.add(label);
+    _logger.log(
+      'WebRTC [$remoteId]: channel open label=$label '
+      'open=${_openChannels.join(',')}',
+    );
     if (_requiredChannels.every(_openChannels.contains)) {
       _setState(WebRtcConnectionState.connected);
       if (_connectCompleter != null && !_connectCompleter!.isCompleted) {
@@ -316,6 +339,7 @@ class WebRtcConnectionManager {
 
   void _markChannelClosed(String label) {
     _openChannels.remove(label);
+    _logger.warning('WebRTC [$remoteId]: channel closed label=$label');
     _setState(WebRtcConnectionState.disconnected);
   }
 
@@ -353,6 +377,8 @@ class WebRtcConnectionManager {
   }
 
   void _setState(WebRtcConnectionState state) {
+    if (_state == state) return;
+    _logger.log('WebRTC [$remoteId]: state ${_state.name} -> ${state.name}');
     _state = state;
     if (!_stateController.isClosed) {
       _stateController.add(state);

@@ -210,6 +210,12 @@ class WebRtcSharedSession {
 
       if (state == WebRtcConnectionState.disconnected ||
           state == WebRtcConnectionState.error) {
+        // Signal Sendspin consumers so they re-run their handshake on reconnect.
+        if (_sendspinRefCount > 0 && !_sendspinMessagesController.isClosed) {
+          _sendspinMessagesController.addError(
+            StateError('WebRTC sendspin channel unavailable'),
+          );
+        }
         _scheduleReconnect();
       }
     });
@@ -242,7 +248,14 @@ class WebRtcSharedSession {
       }
 
       _logger.log('WebRTC shared session [$remoteId]: reconnect timer fired');
-      unawaited(ensureConnected());
+      unawaited(
+        ensureConnected().catchError((Object error) {
+          _logger.warning(
+            'WebRTC shared session [$remoteId]: reconnect attempt failed: $error',
+          );
+          _scheduleReconnect();
+        }),
+      );
     });
   }
 

@@ -335,6 +335,7 @@ class SendspinService {
       }
 
       _logger.log('Sendspin: Connected and registered successfully');
+      _reconnectAttempts = 0;
       _updateState(SendspinConnectionState.connected);
       _startHeartbeat();
 
@@ -405,6 +406,7 @@ class SendspinService {
       }
 
       _logger.log('Sendspin: Connected and registered successfully via ${transport.label}');
+      _reconnectAttempts = 0;
       _updateState(SendspinConnectionState.connected);
       _startHeartbeat();
       return true;
@@ -663,13 +665,15 @@ class SendspinService {
     // During handshake, we need to send hello even though state is still 'connecting'
     if (!allowDuringHandshake && state != SendspinConnectionState.connected) return;
 
-    try {
-      final json = jsonEncode(message);
-      _logger.debug('Sendspin: Sending message: ${message['type']}');
-      unawaited(_transport!.send(json));
-    } catch (e) {
-      _logger.log('Sendspin: Error sending message: $e');
-    }
+    final json = jsonEncode(message);
+    _logger.debug('Sendspin: Sending message: ${message['type']}');
+    unawaited(
+      _transport!.send(json).catchError((Object error) {
+        _logger.log(
+          'Sendspin: Error sending message ${message["type"]}: $error',
+        );
+      }),
+    );
   }
 
   /// Report current player state to server
@@ -759,18 +763,28 @@ class SendspinService {
     _heartbeatTimer = null;
   }
 
-  /// Schedule reconnection attempt
+  int _reconnectAttempts = 0;
+
+  /// Schedule reconnection attempt with exponential backoff.
   void _scheduleReconnect() {
     if (_isDisposed) return;
+    if (_connectionInProgress != null) return;
 
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 5), () {
+    final cappedAttempt = _reconnectAttempts > 4 ? 4 : _reconnectAttempts;
+    final delaySeconds = 1 << cappedAttempt; // 1, 2, 4, 8, 16 s
+    _reconnectAttempts++;
+    _logger.log(
+      'Sendspin: scheduling reconnect attempt=$_reconnectAttempts delay=${delaySeconds}s',
+    );
+
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
       if (!_isDisposed && _state != SendspinConnectionState.connected) {
         _logger.log('Sendspin: Attempting reconnection...');
         if (_transportBuilder != null) {
-          connect();
+          unawaited(connect());
         } else if (_connectedUrl != null) {
-          connectWithUrl(_connectedUrl!);
+          unawaited(connectWithUrl(_connectedUrl!));
         }
       }
     });

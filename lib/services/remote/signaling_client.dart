@@ -92,6 +92,11 @@ class SignalingClient {
     try {
       final decoded = jsonDecode(message);
       if (decoded is Map<String, dynamic>) {
+        // Respond to keepalive pings immediately — server disconnects if ignored.
+        if (decoded['type'] == 'ping') {
+          _channel?.sink.add(jsonEncode({'type': 'pong'}));
+          return;
+        }
         _messageController.add(decoded);
       }
     } catch (_) {

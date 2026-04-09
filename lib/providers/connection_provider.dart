@@ -254,6 +254,9 @@ class ConnectionProvider with ChangeNotifier {
       // In WebRTC mode without an explicit URL, never use the saved direct-mode
       // server URL as the effective base — it would contaminate the
       // HttpEndpointResolver and generate imageproxy URLs against a stale host.
+      if (wantsWebRtc) {
+        _discoveredHttpEndpoint = null;
+      }
 
       final effectiveServerUrl = hasExplicitServerUrl
           ? normalizedServerUrl!
@@ -399,6 +402,7 @@ class ConnectionProvider with ChangeNotifier {
     _connectionStateSubscription?.cancel();
     _connectionStateSubscription = null;
     await _api?.disconnect();
+    _discoveredHttpEndpoint = null;
     _connectionState = MAConnectionState.disconnected;
     notifyListeners();
   }
