@@ -4416,13 +4416,8 @@ class MusicAssistantProvider with ChangeNotifier {
               _matchesBuiltinId(_selectedPlayer!.playerId, builtinPlayerId);
           final currentIsAvailable = _selectedPlayer != null &&
               _availablePlayers.any((p) => p.playerId == _selectedPlayer!.playerId && p.available);
-          // Respect user override: if the current player exists on the server (even
-          // temporarily unavailable due to BT state lag), lock the override flag and
-          // keep the selection rather than forcing back to frank's Phone.
-          final currentExistsOnServer = _selectedPlayer != null &&
-              _availablePlayers.any((p) => p.playerId == _selectedPlayer!.playerId);
-          if (!currentIsBuiltin && (currentIsAvailable || currentExistsOnServer) && _selectedPlayer != null) {
-            // User has selected a non-builtin player — respect their choice
+          if (!currentIsBuiltin && currentIsAvailable && _selectedPlayer != null) {
+            // User has selected a non-builtin player that is online — respect their choice
             // and implicitly set the user-override flag to stabilise future refreshes.
             _aaUserOverride = true;
             _logger.log('🚗 AA session active: user has non-builtin player "${_selectedPlayer!.name}" — respecting selection');
