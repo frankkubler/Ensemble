@@ -2346,7 +2346,10 @@ class MusicAssistantProvider with ChangeNotifier {
         _sendspinService!.dispose();
       }
       _sendspinService = SendspinService(
-        _serverUrl!,
+        // In WebRTC mode, serverUrl is not used (transport provided by
+        // transportBuilder). _discoveredHttpEndpoint may still be null at
+        // this point, so fall back to empty string to avoid a null-assertion crash.
+        _serverUrl ?? '',
         transportBuilder: wantsWebRtc
             ? () => WebRtcSendspinTransport(
                   remoteId: _connectionProvider.webRtcRemoteId!,
