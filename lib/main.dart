@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:audio_service/audio_service.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'l10n/app_localizations.dart';
 import 'providers/locale_provider.dart';
@@ -20,6 +21,7 @@ import 'services/auth/auth_manager.dart';
 import 'services/debug_logger.dart';
 import 'services/hardware_volume_service.dart';
 import 'services/music_assistant_api.dart' show MAConnectionState;
+import 'services/remote/webrtc_shared_session.dart';
 import 'theme/theme_provider.dart';
 import 'theme/app_theme.dart';
 import 'theme/system_theme_helper.dart';
@@ -135,6 +137,8 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
   StreamSubscription? _volumeUpSub;
   StreamSubscription? _volumeDownSub;
   StreamSubscription? _absoluteVolumeSub;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  List<ConnectivityResult> _lastConnectivityResults = [];
   String? _lastSelectedPlayerId;
   String? _builtinPlayerId;
 
@@ -150,8 +154,49 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
     audioHandler.setProvider(_musicProvider);
     WidgetsBinding.instance.addObserver(this);
     _initHardwareVolumeControl();
+    _initConnectivityListener();
     // Listen to player selection changes to toggle volume interception
     _musicProvider.addListener(_onProviderChanged);
+  }
+
+  void _initConnectivityListener() {
+    _connectivitySub = Connectivity()
+        .onConnectivityChanged
+        .listen((List<ConnectivityResult> results) {
+      final hadNetwork = _lastConnectivityResults.any(_isUsableNetwork);
+      final hasNetwork = results.any(_isUsableNetwork);
+
+      // Only act when we GAIN a (new) network connection, not on loss.
+      // This covers: mobile → wifi, wifi → mobile, no-network → any.
+      if (hasNetwork &&
+          (!hadNetwork || _networkTypeChanged(_lastConnectivityResults, results))) {
+        _logger.log(
+          '📡 Network change: '
+          '${_lastConnectivityResults.map((r) => r.name).join(",")} → '
+          '${results.map((r) => r.name).join(",")} — forcing reconnect',
+        );
+        // Reset WebRTC backoff so we don’t wait 8-16 s due to prior failures.
+        WebRtcSharedSessionRegistry.forceReconnectAll();
+        // Also handle direct-WS / auth reconnect.
+        _musicProvider.checkAndReconnect();
+      }
+
+      _lastConnectivityResults = results;
+    });
+  }
+
+  static bool _isUsableNetwork(ConnectivityResult r) =>
+      r == ConnectivityResult.wifi ||
+      r == ConnectivityResult.mobile ||
+      r == ConnectivityResult.ethernet;
+
+  static bool _networkTypeChanged(
+    List<ConnectivityResult> prev,
+    List<ConnectivityResult> next,
+  ) {
+    final prevTypes = prev.where(_isUsableNetwork).toSet();
+    final nextTypes = next.where(_isUsableNetwork).toSet();
+    return prevTypes != nextTypes;
   }
 
   Future<void> _initHardwareVolumeControl() async {
@@ -253,6 +298,7 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
     _volumeUpSub?.cancel();
     _volumeDownSub?.cancel();
     _absoluteVolumeSub?.cancel();
+    _connectivitySub?.cancel();
     _hardwareVolumeService.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();

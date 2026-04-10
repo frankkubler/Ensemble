@@ -11,6 +11,16 @@ enum WebRtcSessionChannel {
 class WebRtcSharedSessionRegistry {
   static final Map<String, WebRtcSharedSession> _sessions = {};
 
+  /// Called when the network changes (e.g. 5G → WiFi).
+  /// Resets the exponential backoff counter and schedules an immediate
+  /// reconnect on every live session so we don't wait 8-16 s after a
+  /// network switch.
+  static void forceReconnectAll() {
+    for (final session in _sessions.values) {
+      session.forceReconnect();
+    }
+  }
+
   static WebRtcSharedSession acquire(String remoteId, WebRtcSessionChannel channel) {
     final normalizedRemoteId = remoteId
         .replaceAll('-', '')
@@ -76,6 +86,18 @@ class WebRtcSharedSession {
     );
   }
 
+  /// Reset the backoff counter and trigger an immediate reconnect.
+  /// Safe to call while a reconnect is already in progress — the pending
+  /// attempt will complete and the duplicate timer call is a no-op.
+  void forceReconnect() {
+    if (_disposed || _manualShutdown || !hasListeners) return;
+    _logger.log('WebRTC shared session [$remoteId]: forceReconnect — resetting backoff');
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempts = 0;
+    _scheduleReconnect();
+  }
+
   Future<void> ensureConnected() async {
     if (_disposed) {
       throw StateError('WebRTC shared session is disposed');
@@ -103,6 +125,9 @@ class WebRtcSharedSession {
       );
       await _createAndConnectManager();
       _reconnectAttempts = 0;
+      // Cancel any pending reconnect timer — connection is now live.
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
       _logger.log('WebRTC shared session [$remoteId]: connected');
       completer.complete();
     } catch (error, stackTrace) {
