@@ -272,6 +272,12 @@ class ConnectionProvider with ChangeNotifier {
         _serverUrl = effectiveServerUrl;
       }
 
+      // Save server info before disposing the old API.  When WebRTC is active
+      // the data channel stays open across API recreation, so MA will NOT
+      // resend server_info.  Passing the cached value allows the new API to
+      // complete its handshake immediately without the 10-30 s timeout.
+      final previousServerInfo = wantsWebRtc ? _api?.serverInfo : null;
+
       // Dispose old API to stop pending reconnects
       _api?.dispose();
 
@@ -281,6 +287,7 @@ class ConnectionProvider with ChangeNotifier {
         transportBuilder: wantsWebRtc
             ? (_) => WebRtcApiTransport(remoteId: _webRtcRemoteId!)
             : null,
+        previousServerInfo: previousServerInfo,
       );
 
       // Notify MAP so it can resubscribe to API event streams

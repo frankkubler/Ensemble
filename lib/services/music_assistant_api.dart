@@ -76,7 +76,27 @@ class MusicAssistantAPI {
     this.serverUrl,
     this.authManager, {
     MAConnectionTransportBuilder? transportBuilder,
-  }) : _transportBuilder = transportBuilder;
+    /// When a WebRTC session is already alive (channel open), the MA server
+    /// will not resend `server_info`.  Passing the last known server info lets
+    /// the API restore auth state and complete the handshake immediately
+    /// instead of waiting on a broadcast that will never arrive.
+    Map<String, dynamic>? previousServerInfo,
+  }) : _transportBuilder = transportBuilder {
+    if (previousServerInfo != null) {
+      _serverInfo = previousServerInfo;
+      _schemaVersion = previousServerInfo['schema_version'] as int?;
+      final needsAuth = previousServerInfo['needs_auth'] as bool? ?? false;
+      final authEnabled = previousServerInfo['auth_enabled'] as bool? ?? false;
+      _authRequired = needsAuth ||
+          authEnabled ||
+          (_schemaVersion != null && _schemaVersion! >= 28);
+      _logger.log(
+        'Connection: Restored server info from previous connection '
+        '(v${previousServerInfo['server_version']}, '
+        'schema=$_schemaVersion, authRequired=$_authRequired)',
+      );
+    }
+  }
 
   /// Check if a URL string has an explicit port (e.g., ":80", ":8095").
   /// Dart's Uri.hasPort returns false for default ports (80/443) even when
@@ -261,6 +281,27 @@ class MusicAssistantAPI {
           _reconnect();
         },
       );
+
+      // WebRTC reconnect optimisation: the MA server only sends `server_info`
+      // when the data channel first opens.  If we are reconnecting on an
+      // already-open channel (session stayed alive in the background) the
+      // broadcast will never arrive — leading to a 10-30 s timeout and a
+      // stale `error` state while the user can already hear audio.
+      // When we have cached server info from a previous connection we know
+      // the channel is live so we complete the handshake immediately and let
+      // ConnectionProvider re-authenticate over the same data channel.
+      if (_serverInfo != null &&
+          transport.mode == MAConnectionMode.webrtc &&
+          transport.isConnected &&
+          !_connectionCompleter!.isCompleted) {
+        _logger.log(
+          'Connection: WebRTC channel already open — completing handshake '
+          'from cached server info; auth will re-verify over data channel',
+        );
+        _updateConnectionState(MAConnectionState.connected);
+        _connectionCompleter!.complete();
+        _startHeartbeat();
+      }
 
       // Wait for server info message with timeout
       await _connectionCompleter!.future.timeout(
