@@ -1903,8 +1903,12 @@ class MusicAssistantProvider with ChangeNotifier {
 
     _logger.log('🔄 checkAndReconnect called - state: $_connectionState');
 
-    if (_serverUrl == null) {
-      _logger.log('🔄 No server URL saved, skipping reconnect');
+    // In WebRTC mode, _serverUrl is null (_discoveredHttpEndpoint not yet set).
+    // Allow reconnect if a WebRTC profile is configured; block only when
+    // no connection profile exists at all.
+    final hasWebRtc = _connectionProvider.hasWebRtcConnectionProfile;
+    if (_serverUrl == null && !hasWebRtc) {
+      _logger.log('🔄 No server URL saved and no WebRTC profile, skipping reconnect');
       return;
     }
 
@@ -1955,9 +1959,9 @@ class MusicAssistantProvider with ChangeNotifier {
 
       if (_connectionState != MAConnectionState.connected &&
           _connectionState != MAConnectionState.authenticated) {
-        _logger.log('🔄 Not connected, attempting reconnect to $_serverUrl');
+        _logger.log('🔄 Not connected, attempting reconnect to ${_serverUrl ?? 'webrtc'}');
         try {
-          await connectToServer(_serverUrl!);
+          await connectToServer(_serverUrl);
           _logger.log('🔄 Reconnection successful');
         } catch (e) {
           _logger.log('🔄 Reconnection failed: $e');
@@ -1991,7 +1995,7 @@ class MusicAssistantProvider with ChangeNotifier {
         } catch (e) {
           _logger.log('🔄 Connection verification failed, reconnecting: $e');
           try {
-            await connectToServer(_serverUrl!);
+            await connectToServer(_serverUrl);
           } catch (reconnectError) {
             _logger.log('🔄 Reconnection failed: $reconnectError');
           }
