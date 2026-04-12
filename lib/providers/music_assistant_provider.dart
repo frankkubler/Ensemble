@@ -4411,12 +4411,15 @@ class MusicAssistantProvider with ChangeNotifier {
         // Exception 2: if the current selection is already a non-builtin available player,
         // the user has made a deliberate choice — do not override regardless of the
         // code path that triggered this refresh (notification, mini-player, etc.).
+        // Exception 3: only applies when _pendingAASwitch is false — if a switch is
+        // pending it means the current selection is a pre-AA leftover (e.g. SOUNDBAR_BT),
+        // not a deliberate in-session choice, and must not suppress the AA forcing.
         if (_aaSessionActive && !_aaUserOverride && builtinPlayerId != null) {
           final currentIsBuiltin = _selectedPlayer != null &&
               _matchesBuiltinId(_selectedPlayer!.playerId, builtinPlayerId);
           final currentIsAvailable = _selectedPlayer != null &&
               _availablePlayers.any((p) => p.playerId == _selectedPlayer!.playerId && p.available);
-          if (!currentIsBuiltin && currentIsAvailable && _selectedPlayer != null) {
+          if (!currentIsBuiltin && currentIsAvailable && _selectedPlayer != null && !_pendingAASwitch) {
             // User has selected a non-builtin player that is online — respect their choice
             // and implicitly set the user-override flag to stabilise future refreshes.
             _aaUserOverride = true;
