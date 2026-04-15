@@ -4208,6 +4208,9 @@ class MusicAssistantProvider with ChangeNotifier {
       }
 
       _logger.log('🎛️ getPlayers returned ${allPlayers.length} players:');
+      for (final p in allPlayers) {
+        _logger.log('   📋 ${p.name} (${p.playerId}) — available: ${p.available}, powered: ${p.powered}, provider: ${p.provider}');
+      }
 
       int filteredCount = 0;
 
@@ -4242,12 +4245,11 @@ class MusicAssistantProvider with ChangeNotifier {
           }
         }
 
+        // Keep unavailable players in the list (dimmed in UI) so the user
+        // can see them and power them on.  Only the builtin player was
+        // previously exempted; now all server-known players are kept.
         if (!player.available) {
-          if (builtinPlayerId != null && _matchesBuiltinId(player.playerId, builtinPlayerId)) {
-            return true;
-          }
-          filteredCount++;
-          return false;
+          _logger.log('⚠️ Player unavailable but kept in list: ${player.name} (${player.playerId}), powered: ${player.powered}');
         }
 
         return true;
