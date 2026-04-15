@@ -1263,6 +1263,15 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     playbackState.add(playbackState.value.copyWith(queueIndex: index));
   }
 
+  /// Sync an existing server queue to the MediaSession so AA shows the queue button.
+  /// Called when AA connects while a queue is already loaded on the builtin player.
+  void syncQueueToMediaSession(MusicAssistantProvider provider, List<ma.Track> tracks, int currentIndex) {
+    if (tracks.isEmpty) return;
+    _logger.log('AndroidAuto: syncing ${tracks.length} tracks to MediaSession (index=$currentIndex)');
+    _populateQueue(provider, tracks, currentIndex);
+    _refreshPlaybackState();
+  }
+
   /// Fetch the server queue after a delay (e.g. after starting radio/podcast) and update AA queue.
   void _refreshQueueAfterDelay(MusicAssistantProvider provider, String playerId) {
     _queueRefreshTimer?.cancel();

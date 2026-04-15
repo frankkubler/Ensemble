@@ -2034,11 +2034,17 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onAAConnected = () async {
       _suppressSendspinAutoResume = false;
-      _pendingAASwitch = false;
+      // Mark pending BEFORE the async gap below — if _loadAndSelectPlayers
+      // runs during the await it must NOT treat the pre-AA selection (e.g.
+      // SOUNDBAR_BT) as a deliberate user choice (Exception 2 in Priority-0).
+      _pendingAASwitch = true;
       _aaSessionActive = true;
       _aaUserOverride = false; // Clear any previous user override when AA reconnects
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
-      if (builtinPlayerId == null) return;
+      if (builtinPlayerId == null) {
+        _pendingAASwitch = false;
+        return;
+      }
 
       // Remember the previously active player (e.g. SOUNDBAR_BT / ESP32)
       // but do NOT pause it — the soundbar is an independent device and should
@@ -2056,24 +2062,24 @@ class MusicAssistantProvider with ChangeNotifier {
             .firstOrNull;
         if (builtinPlayer != null) {
           _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
-          // If selectPlayer is currently blocked by the reentrancy guard, mark as pending.
+          // If selectPlayer is currently blocked by the reentrancy guard, keep pending.
           // _loadAndSelectPlayers will resolve it via _aaSessionActive on its next call.
           if (_selectPlayerInProgress) {
-            _logger.log('⏳ AA switch: selectPlayer in progress, marking _pendingAASwitch for next _loadAndSelectPlayers');
-            _pendingAASwitch = true;
+            _logger.log('⏳ AA switch: selectPlayer in progress, keeping _pendingAASwitch for next _loadAndSelectPlayers');
           } else {
+            _pendingAASwitch = false; // Switch resolved
             selectPlayer(builtinPlayer);
             // Proactively restore queue so the play button works immediately
             unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayer.playerId));
           }
         } else {
-          // Players list not yet populated — mark as pending, resolved in _loadAndSelectPlayers
+          // Players list not yet populated — keep pending, resolved in _loadAndSelectPlayers
           final availableIds = _availablePlayers.map((p) => '${p.name}(${p.playerId})').join(', ');
           _logger.log('⚠️ AA connected but builtin ($builtinPlayerId) not in list yet — available: [$availableIds]');
-          _pendingAASwitch = true;
         }
       } else {
         // Already on builtin player, still restore queue in case server lost it
+        _pendingAASwitch = false; // Already on builtin, no switch needed
         unawaited(_proactivelyRestoreQueueAfterAAReconnect(builtinPlayerId));
       }
     };
@@ -6347,6 +6353,10 @@ class MusicAssistantProvider with ChangeNotifier {
       final serverQueue = await getQueue(playerId);
       if (serverQueue != null && serverQueue.items.isNotEmpty) {
         _logger.log('✅ AA reconnect: server queue intact (${serverQueue.items.length} tracks)');
+        // Sync queue to MediaSession so AA shows the queue button
+        final tracks = serverQueue.items.map((qi) => qi.track).toList();
+        final currentIndex = serverQueue.currentIndex ?? 0;
+        audioHandler.syncQueueToMediaSession(this, tracks, currentIndex);
         // Restore saved position so seeking back works as expected
         await _restorePositionAfterAAReconnect(playerId);
         return;
@@ -6357,6 +6367,13 @@ class MusicAssistantProvider with ChangeNotifier {
       final restored = await _restoreQueueFromCache(playerId, startPlayback: false);
       if (restored) {
         _logger.log('✅ AA reconnect: queue pre-loaded, play button ready');
+        // Also sync the freshly restored queue to MediaSession
+        final restoredQueue = await getQueue(playerId);
+        if (restoredQueue != null && restoredQueue.items.isNotEmpty) {
+          final tracks = restoredQueue.items.map((qi) => qi.track).toList();
+          final currentIndex = restoredQueue.currentIndex ?? 0;
+          audioHandler.syncQueueToMediaSession(this, tracks, currentIndex);
+        }
       } else {
         _logger.log('❌ AA reconnect: no cached queue available');
       }
