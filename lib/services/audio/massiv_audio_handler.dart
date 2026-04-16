@@ -67,6 +67,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   // Android Auto connection state — used to hide switch player button from controls
   bool _isAndroidAutoConnected = false;
 
+  /// Whether Android Auto is currently connected (public read-only).
+  bool get isAndroidAutoConnected => _isAndroidAutoConnected;
+
   // Suppress auto-resume after audio route changes (e.g. BT/AA disconnect)
   bool _suppressResume = false;
 

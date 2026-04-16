@@ -2034,6 +2034,23 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onBrowseActivity = () {
       _cancelIdleServiceTimer();
+      // Safety net: AA sends getChildren on every browse interaction. If
+      // _aaSessionActive was cleared by a stale debounce or missed event while
+      // AA is still active, re-enable the session and force-refresh players so
+      // Priority-0 can switch to the builtin player.
+      if (!_aaSessionActive && audioHandler.isAndroidAutoConnected) {
+        _logger.log('🚗 Browse activity: AA connected but session inactive — re-enabling');
+        // Remember current player for restore on AA disconnect (best-effort —
+        // we can't async-check builtin ID here so _loadAndSelectPlayers will
+        // do the actual switch).
+        if (_selectedPlayer != null && _preAASelectedPlayerId == null) {
+          _preAASelectedPlayerId = _selectedPlayer!.playerId;
+        }
+        _aaSessionActive = true;
+        _pendingAASwitch = true;
+        _aaUserOverride = false;
+        _loadAndSelectPlayers(forceRefresh: true);
+      }
     };
     audioHandler.onAAConnected = () async {
       // Cancel any pending debounced disconnect — AA reconnected before the
@@ -2113,6 +2130,13 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('🎵 AA disconnected: scheduling debounced teardown (3s)');
       _aaDisconnectDebounceTimer?.cancel();
       _aaDisconnectDebounceTimer = Timer(const Duration(seconds: 3), () async {
+        // Guard: if AA reconnected while the debounce was ticking but the
+        // reconnect came via a path that didn't cancel the timer (e.g. native
+        // broadcast arrived just as the timer fired), abort the teardown.
+        if (audioHandler.isAndroidAutoConnected) {
+          _logger.log('🎵 AA disconnect debounce fired but AA is still connected — aborting teardown');
+          return;
+        }
         _pendingAASwitch = false;
         _aaSessionActive = false;
         _aaUserOverride = false; // Clear user override when AA disconnects
@@ -4439,6 +4463,16 @@ class MusicAssistantProvider with ChangeNotifier {
         final lastSelectedPlayerId = await SettingsService.getLastSelectedPlayerId();
 
         _logger.log('⚙️ Current selection: ${_selectedPlayer?.name ?? 'none'}, lastSelected=$lastSelectedPlayerId, coldStart=$coldStart');
+
+        // RESYNC: If the audio handler reports AA is connected but our flag is
+        // stale (debounce timer may have incorrectly cleared it), re-establish
+        // the AA session so that Priority 0 can do its job.
+        if (!_aaSessionActive && audioHandler.isAndroidAutoConnected && builtinPlayerId != null) {
+          _logger.log('🚗 AA resync: audioHandler says AA connected but _aaSessionActive was false — re-enabling');
+          _aaSessionActive = true;
+          _pendingAASwitch = true;
+          _aaUserOverride = false;
+        }
 
         // PRIORITY 0: Android Auto session active — always select the phone/builtin player.
         // This overrides any other selection logic to ensure that repeated calls to
