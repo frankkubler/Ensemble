@@ -164,6 +164,9 @@ class MusicAssistantProvider with ChangeNotifier {
   bool _aaUserOverride = false;
   // Player that was active before AA connected (to pause it on switch).
   String? _preAASelectedPlayerId;
+  // Debounce timer for AA disconnect — avoids acting on transient disconnect/reconnect
+  // bounces (e.g. 3-second gaps seen in Android Auto).
+  Timer? _aaDisconnectDebounceTimer;
 
   /// Returns true when [serverId] (as returned by the MA server) represents
   /// the same player as [storedId] (stored locally via Sendspin registration).
@@ -2033,6 +2036,14 @@ class MusicAssistantProvider with ChangeNotifier {
       _cancelIdleServiceTimer();
     };
     audioHandler.onAAConnected = () async {
+      // Cancel any pending debounced disconnect — AA reconnected before the
+      // debounce fired, so the disconnect was transient (bounce).
+      if (_aaDisconnectDebounceTimer?.isActive ?? false) {
+        _aaDisconnectDebounceTimer!.cancel();
+        _logger.log('🚗 AA reconnect: cancelled pending disconnect debounce (bounce)');
+        // _aaSessionActive is still true from before the disconnect,
+        // just ensure pending switch is set and continue.
+      }
       _suppressSendspinAutoResume = false;
       // Mark pending BEFORE the async gap below — if _loadAndSelectPlayers
       // runs during the await it must NOT treat the pre-AA selection (e.g.
@@ -2062,10 +2073,21 @@ class MusicAssistantProvider with ChangeNotifier {
             .firstOrNull;
         if (builtinPlayer != null) {
           _logger.log('🎵 AA connected: auto-selecting builtin player "${builtinPlayer.name}"');
-          // If selectPlayer is currently blocked by the reentrancy guard, keep pending.
-          // _loadAndSelectPlayers will resolve it via _aaSessionActive on its next call.
+          // If selectPlayer is currently blocked by the reentrancy guard, keep pending
+          // and schedule a retry so we don't wait for an external event (e.g. app resume).
           if (_selectPlayerInProgress) {
-            _logger.log('⏳ AA switch: selectPlayer in progress, keeping _pendingAASwitch for next _loadAndSelectPlayers');
+            _logger.log('⏳ AA switch: selectPlayer in progress, scheduling retry');
+            unawaited(() async {
+              // Wait for the current selectPlayer to finish, then force the switch
+              for (int i = 0; i < 50; i++) {
+                await Future.delayed(const Duration(milliseconds: 100));
+                if (!_selectPlayerInProgress) break;
+              }
+              if (_pendingAASwitch && _aaSessionActive) {
+                _logger.log('🔄 AA switch: retrying after selectPlayer guard released');
+                await _loadAndSelectPlayers(forceRefresh: true);
+              }
+            }());
           } else {
             _pendingAASwitch = false; // Switch resolved
             selectPlayer(builtinPlayer);
@@ -2085,16 +2107,23 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onAADisconnected = () async {
       _suppressSendspinAutoResume = true;
-      _pendingAASwitch = false;
-      _aaSessionActive = false;
-      _aaUserOverride = false; // Clear user override when AA disconnects
-      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
-      if (builtinPlayerId != null) {
-        _logger.log('🎵 AA disconnected: snapshotting state then pausing builtin player');
-        // Snapshot queue + position BEFORE pausing so they survive server-side queue clear
-        await _snapshotPlayerStateBeforePause(builtinPlayerId);
-        pausePlayer(builtinPlayerId);
-      }
+      // Debounce the disconnect: Android Auto can bounce (disconnect then
+      // reconnect within a few seconds). Defer the actual teardown by 3s
+      // so a quick reconnect cancels it and avoids queue/player glitches.
+      _logger.log('🎵 AA disconnected: scheduling debounced teardown (3s)');
+      _aaDisconnectDebounceTimer?.cancel();
+      _aaDisconnectDebounceTimer = Timer(const Duration(seconds: 3), () async {
+        _pendingAASwitch = false;
+        _aaSessionActive = false;
+        _aaUserOverride = false; // Clear user override when AA disconnects
+        final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+        if (builtinPlayerId != null) {
+          _logger.log('🎵 AA disconnected (confirmed): snapshotting state then pausing builtin player');
+          // Snapshot queue + position BEFORE pausing so they survive server-side queue clear
+          await _snapshotPlayerStateBeforePause(builtinPlayerId);
+          pausePlayer(builtinPlayerId);
+        }
+      });
     };
 
     // Player registration is now handled in _initializeAfterConnection()
@@ -6349,6 +6378,34 @@ class MusicAssistantProvider with ChangeNotifier {
   /// playback so the play button works immediately in Android Auto.
   Future<void> _proactivelyRestoreQueueAfterAAReconnect(String playerId) async {
     try {
+      // Immediately populate MediaSession with cached track so AA shows
+      // something useful right away instead of a blank "Now Playing".
+      final cachedTrack = getCachedTrackForPlayer(playerId) ?? _currentTrack;
+      if (cachedTrack != null) {
+        final artworkUrl = _api?.getImageUrl(cachedTrack, size: 512);
+        final displayArtist = _trackDisplayArtist(cachedTrack);
+        final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
+          (p) => p!.playerId == playerId || _matchesBuiltinId(p.playerId, playerId),
+          orElse: () => null,
+        );
+        final playerName = builtinPlayer?.name ?? 'Phone';
+        final artistWithPlayer = '$displayArtist • $playerName';
+        final mediaItem = audio_service.MediaItem(
+          id: cachedTrack.uri ?? cachedTrack.itemId,
+          title: cachedTrack.name,
+          artist: artistWithPlayer,
+          album: cachedTrack.album?.name ?? '',
+          duration: cachedTrack.duration,
+          artUri: _contentArtUri(artworkUrl),
+        );
+        audioHandler.updateLocalModeNotification(
+          item: mediaItem,
+          playing: false,
+          duration: cachedTrack.duration,
+        );
+        _logger.log('🚗 AA reconnect: pre-filled MediaSession with "${cachedTrack.name}" (paused)');
+      }
+
       // Small delay to let the server finish its own AA handshake
       await Future.delayed(const Duration(seconds: 2));
 

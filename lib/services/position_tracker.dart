@@ -213,7 +213,11 @@ class PositionTracker {
   void onPlayerSelected(String playerId) {
     if (_playerId != playerId) {
       _playerId = playerId;
-      // Don't reset position - let updateFromServer handle it with actual data
+      // Stop interpolation until we get fresh data from updateFromServer.
+      // This prevents hasReachedEnd from firing with stale duration/position
+      // from the previous player (e.g. SOUNDBAR position 178s vs Phone duration 110s).
+      _isPlaying = false;
+      _stopInterpolationTimer();
       _lastEmittedSeconds = -1;
     }
   }
