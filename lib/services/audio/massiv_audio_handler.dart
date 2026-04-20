@@ -918,6 +918,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         }
         _logger.log('AndroidAuto: Starting artist radio for "$artistName"');
         await provider.api?.playArtistRadio(playerId, artist);
+        await provider.api?.resumePlayer(playerId);
         _refreshQueueAfterDelay(provider, playerId);
         return;
       }
@@ -932,6 +933,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         final seed = trackList[Random().nextInt(trackList.length)];
         try {
           await provider.api?.playRadio(playerId, seed);
+          await provider.api?.resumePlayer(playerId);
           _refreshQueueAfterDelay(provider, playerId);
         } catch (e) {
           _logger.log('AndroidAuto: Start Radio failed, playing shuffled: $e');
@@ -991,6 +993,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           ),
         );
         await provider.api!.playRadioStation(playerId, station);
+        await provider.api!.resumePlayer(playerId);
         return;
       }
 
@@ -1010,6 +1013,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           orElse: () => throw Exception('Audiobook not found: $mediaId'),
         );
         await provider.api!.playAudiobook(playerId, book);
+        await provider.api!.resumePlayer(playerId);
         return;
       }
 
@@ -1046,6 +1050,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         );
         _logger.log('AndroidAuto: playing podcast episode URI: $uri');
         await provider.api!.playPodcastEpisode(playerId, episode);
+        await provider.api!.resumePlayer(playerId);
 
         // Refresh queue after a delay (server needs time to build queue)
         _refreshQueueAfterDelay(provider, playerId);
