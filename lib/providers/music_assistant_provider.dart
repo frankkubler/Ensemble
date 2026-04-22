@@ -148,6 +148,11 @@ class MusicAssistantProvider with ChangeNotifier {
   // firing until the user explicitly triggers playback again.
   bool _suppressSendspinAutoResume = false;
 
+  // Guard against concurrent play_media calls (artist radio, playlists, etc.).
+  // Subsequent taps while a play_media command is in-flight are dropped so
+  // they don't stack up when the server is slow to respond.
+  bool _isStartingPlayMedia = false;
+
   // Android Auto session state
   // True when AA connected event fired but builtin player was not yet in
   // _availablePlayers — resolved in _loadAndSelectPlayers().
@@ -6218,7 +6223,28 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> playArtistRadio(String playerId, Artist artist) async {
+    // Drop duplicate taps while a previous play_media command is still in-flight.
+    if (_isStartingPlayMedia) {
+      _logger.log('⚠️ playArtistRadio: already in progress, dropping duplicate call');
+      return;
+    }
+    _isStartingPlayMedia = true;
     _suppressSendspinAutoResume = false;
+
+    // Optimistic local stop: cut the current audio immediately so the user
+    // hears a clear break even while the server resolves the artist radio.
+    // This mirrors the same pattern used in nextTrack().
+    try {
+      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+      if (builtinPlayerId != null && playerId == builtinPlayerId && _sendspinConnected) {
+        _logger.log('⏭️ Non-blocking local stop for artist radio on builtin player');
+        unawaited((_pcmAudioPlayer?.pause() ?? Future.value()).catchError(
+          (e) => _logger.log('⚠️ PCM pause error on radio start (non-blocking): $e'),
+        ));
+        _sendspinService?.reportState(playing: false, paused: true);
+      }
+    } catch (_) {}
+
     try {
       await _api?.playArtistRadio(playerId, artist);
     } catch (e) {
@@ -6237,6 +6263,8 @@ class MusicAssistantProvider with ChangeNotifier {
         notifyListeners();
         rethrow;
       }
+    } finally {
+      _isStartingPlayMedia = false;
     }
   }
 
@@ -6289,6 +6317,15 @@ class MusicAssistantProvider with ChangeNotifier {
       _aaUserOverride = true;
       _logger.log('👤 User override: resumePlayer($playerId) during AA session');
     }
+
+    // Guard: if not connected, silently drop the command. The notification/AA
+    // play button can fire before the reconnection completes, which would cause
+    // an unhandled ZoneError because onPlay/onSkipToNext callbacks do not await.
+    if (_connectionState != MAConnectionState.authenticated) {
+      _logger.log('⚠️ resumePlayer skipped: not authenticated (state: $_connectionState)');
+      return;
+    }
+
     // Only lift the Sendspin auto-resume suppression when the user explicitly
     // resumes the built-in/Sendspin player itself. Resetting this flag for any
     // other player would allow the phone speaker to unexpectedly start audio if
