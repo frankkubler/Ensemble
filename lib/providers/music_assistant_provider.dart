@@ -6364,6 +6364,15 @@ class MusicAssistantProvider with ChangeNotifier {
         return;
       }
 
+      // Timeout on a 'play' queue command is treated as non-fatal: the server
+      // likely processed the command before we timed out (MA can be slow to ACK
+      // play/pause). Rethrowing would surface as an unhandled ZoneError when
+      // called from a non-async callback (notification, AA control).
+      if (e is TimeoutException) {
+        _logger.log('⚠️ resumePlayer timeout (non-fatal, server may have processed): $e');
+        return;
+      }
+
       ErrorHandler.logError('Resume player', e);
       rethrow;
     }

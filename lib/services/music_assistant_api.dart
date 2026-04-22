@@ -346,6 +346,7 @@ class MusicAssistantAPI {
   Future<Map<String, dynamic>> _sendCommand(
     String command, {
     Map<String, dynamic>? args,
+    Duration? timeout,
   }) async {
     // Allow auth commands when connected or authenticating
     // For all other commands, require authenticated state if auth is required
@@ -399,7 +400,7 @@ class MusicAssistantAPI {
     // Timeout after configured duration, ensure cleanup in all cases
     try {
       return await completer.future.timeout(
-        Timings.commandTimeout,
+        timeout ?? Timings.commandTimeout,
         onTimeout: () {
           throw TimeoutException('Command timeout: $command');
         },
@@ -2356,23 +2357,26 @@ class MusicAssistantAPI {
   /// Play radio based on an artist (generates tracks from and similar to the artist)
   /// Prefers streaming provider URIs (Spotify, Tidal, etc.) for better recommendations
   Future<void> playArtistRadio(String playerId, Artist artist) async {
-    return await RetryHelper.retryCritical(
-      operation: () async {
-        final artistUri = _buildArtistRadioUri(artist);
-        _logger.log('Radio: Starting artist radio with URI $artistUri');
+    // Radio commands are intentionally NOT retried: the MA server processes every
+    // play_media it receives, even if the client timed out. Retrying sends a
+    // second "replace" command that overwrites the queue the first attempt just
+    // started, producing a 1-second stream that cuts immediately.
+    // Spotify radio can legitimately take 40+ seconds server-side; use a 90s
+    // timeout with a single attempt instead.
+    final artistUri = _buildArtistRadioUri(artist);
+    _logger.log('Radio: Starting artist radio with URI $artistUri');
 
-        final args = {
-          'queue_id': playerId,
-          'media': [artistUri],
-          'option': 'replace',
-          'radio_mode': true,
-        };
+    final args = {
+      'queue_id': playerId,
+      'media': [artistUri],
+      'option': 'replace',
+      'radio_mode': true,
+    };
 
-        await _sendCommand(
-          'player_queues/play_media',
-          args: args,
-        );
-      },
+    await _sendCommand(
+      'player_queues/play_media',
+      args: args,
+      timeout: const Duration(seconds: 90),
     );
   }
 
