@@ -5490,6 +5490,13 @@ class MusicAssistantProvider with ChangeNotifier {
           }
           stateChanged = true;
 
+          // Reset position tracker for the new track so hasReachedEnd doesn't stay
+          // true from the previous track, which would freeze the AA notification.
+          _positionTracker.onTrackChange(
+            _selectedPlayer!.playerId,
+            _currentTrack?.duration,
+          );
+
           // Persist the updated playback state to database for instant restore on next launch
           _persistPlaybackState();
 
