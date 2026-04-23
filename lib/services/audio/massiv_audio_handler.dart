@@ -133,7 +133,11 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             break;
           case AudioInterruptionType.pause:
           case AudioInterruptionType.unknown:
-            _wasPlayingBeforeInterruption = playbackState.value.playing || _isBuiltinPlayerActive;
+            // Only track as "was playing" if actually playing — NOT just because
+            // the builtin player is selected. _isBuiltinPlayerActive is true even
+            // when paused, which caused auto-resume when another app (e.g. Instagram)
+            // released audio focus after the user had manually paused the player.
+            _wasPlayingBeforeInterruption = playbackState.value.playing;
             if (_wasPlayingBeforeInterruption) {
               _player.pause();
               onPause?.call();

@@ -2296,27 +2296,29 @@ class MusicAssistantAPI {
 
   /// Play radio based on a track (generates similar tracks)
   /// Prefers streaming provider URIs (Spotify, Tidal, etc.) for better recommendations
+  ///
+  /// Radio commands are intentionally NOT retried: the MA server processes every
+  /// play_media it receives, even if the client timed out. Retrying sends a second
+  /// 'replace' command that overwrites the queue the first attempt just started,
+  /// producing a 1-second stream that cuts immediately.
+  /// Use a 90s timeout with a single attempt instead.
   Future<void> playRadio(String playerId, Track track) async {
-    return await RetryHelper.retryCritical(
-      operation: () async {
-        // For radio mode, prefer streaming providers (Spotify, Tidal, etc.)
-        // as they provide better dynamic track recommendations
-        final trackUri = _buildRadioUri(track);
-        _logger.log('Radio: Starting with URI $trackUri');
+    // For radio mode, prefer streaming providers (Spotify, Tidal, etc.)
+    // as they provide better dynamic track recommendations
+    final trackUri = _buildRadioUri(track);
+    _logger.log('Radio: Starting with URI $trackUri');
 
-        final args = {
-          'queue_id': playerId,
-          'media': [trackUri],
-          'option': 'replace',
-          'radio_mode': true, // Enable radio mode for similar tracks
-        };
+    final args = {
+      'queue_id': playerId,
+      'media': [trackUri],
+      'option': 'replace',
+      'radio_mode': true, // Enable radio mode for similar tracks
+    };
 
-        await _sendCommand(
-          'player_queues/play_media',
-          args: args,
-        );
-
-      },
+    await _sendCommand(
+      'player_queues/play_media',
+      args: args,
+      timeout: const Duration(seconds: 90),
     );
   }
 
@@ -3357,6 +3359,7 @@ class MusicAssistantAPI {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 10);
 
+      try {
       final request = await client.getUrl(Uri.parse(url));
       final response = await request.close();
 
@@ -3390,6 +3393,9 @@ class MusicAssistantAPI {
       }
 
       return artworkUrl;
+      } finally {
+        client.close();
+      }
     } catch (e) {
       _logger.log('🎨 iTunes lookup error for "$podcastName": $e');
       return null;
@@ -3677,13 +3683,10 @@ class MusicAssistantAPI {
     try {
       // Send a lightweight command to check connection is alive
       // Using 'info' as it's a valid MA command
-      await _sendCommand('info').timeout(
-        const Duration(seconds: 10),
-        onTimeout: () {
-          _logger.log('Heartbeat timeout - connection may be stale');
-          return <String, dynamic>{};
-        },
-      );
+      // NOTE: do NOT add an outer .timeout() with onTimeout returning {} here —
+      // that would silently swallow the timeout without triggering reconnect.
+      // Let _sendCommand's internal timeout throw so the catch block fires.
+      await _sendCommand('info');
     } catch (e) {
       _logger.log('Heartbeat failed: $e');
       // Connection may be dead, trigger reconnect
