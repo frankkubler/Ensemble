@@ -2018,8 +2018,10 @@ class MusicAssistantProvider with ChangeNotifier {
       // support the player_queues/play command (MA error 999).
       // Also handle the case where _aaSessionActive is still false but AA is
       // already physically connected (onPlay fires before getChildren sets the flag).
+      // Exception: if the user has explicitly selected another player (_aaUserOverride)
+      // respect their choice — consistent with _loadAndSelectPlayers Exception 2.
       String? targetPlayerId = _selectedPlayer?.playerId;
-      if (_aaSessionActive || audioHandler.isAndroidAutoConnected) {
+      if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
         final builtinId = await SettingsService.getBuiltinPlayerId();
         if (builtinId != null) targetPlayerId = builtinId;
       }
@@ -2031,7 +2033,7 @@ class MusicAssistantProvider with ChangeNotifier {
     audioHandler.onPause = () async {
       _logger.log('🎵 Notification: Pause pressed');
       String? targetPlayerId = _selectedPlayer?.playerId;
-      if (_aaSessionActive || audioHandler.isAndroidAutoConnected) {
+      if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
         final builtinId = await SettingsService.getBuiltinPlayerId();
         if (builtinId != null) targetPlayerId = builtinId;
       }
@@ -4510,7 +4512,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
         _logger.log('⚙️ Current selection: ${_selectedPlayer?.name ?? 'none'}, lastSelected=$lastSelectedPlayerId, coldStart=$coldStart');
 
-        // RESYNC: If the audio handler reports AA is connected but our flag is
+        // RESYNC (forward): If the audio handler reports AA is connected but our flag is
         // stale (debounce timer may have incorrectly cleared it), re-establish
         // the AA session so that Priority 0 can do its job.
         if (!_aaSessionActive && audioHandler.isAndroidAutoConnected && builtinPlayerId != null) {
@@ -4518,6 +4520,19 @@ class MusicAssistantProvider with ChangeNotifier {
           _aaSessionActive = true;
           _pendingAASwitch = true;
           _aaUserOverride = false;
+        }
+
+        // RESYNC (backward): If our flag says AA is active but Android Auto is no longer
+        // physically connected, clear stale session state. This happens when the app
+        // reconnects after a network drop that occurred during an AA session — the
+        // onAADisconnected debounce never fires if the whole WS connection drops,
+        // leaving _aaSessionActive=true permanently and causing onPlay/onPause to
+        // incorrectly redirect commands to the builtin player.
+        if (_aaSessionActive && !audioHandler.isAndroidAutoConnected) {
+          _logger.log('🚗 Stale AA session cleared: audioHandler says AA is not connected');
+          _aaSessionActive = false;
+          _aaUserOverride = false;
+          _pendingAASwitch = false;
         }
 
         // PRIORITY 0: Android Auto session active — always select the phone/builtin player.
@@ -4991,7 +5006,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
   /// Update just the notification position (called every 500ms for remote/Sendspin players)
   /// Set [forceUpdate] to true to update even when paused (used after seek)
-  void _updateNotificationPosition({bool forceUpdate = false}) {
+  Future<void> _updateNotificationPosition({bool forceUpdate = false}) async {
     if (_selectedPlayer == null || _currentTrack == null) {
       _notificationPositionTimer?.cancel();
       return;
@@ -5006,6 +5021,7 @@ class MusicAssistantProvider with ChangeNotifier {
     }
 
     final track = _currentTrack!;
+    final selectedPlayerId = _selectedPlayer!.playerId;
 
     // Always use position tracker for notification position - it's the single source of truth.
     // Previously used PCM elapsed time for Sendspin, but this breaks when:
@@ -5018,6 +5034,19 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('PositionTracker: Track appears to have ended (position >= duration)');
       return;
     }
+
+    // Determine if the SELECTED player is the builtin/Sendspin player.
+    // Must check the selected player ID, not just whether Sendspin is connected:
+    // Sendspin stays connected in the background even when a remote player
+    // (e.g. SOUNDBAR_BT) is selected. Calling updateLocalModeNotification for
+    // a remote player wrongly sets _isBuiltinPlayerActive=true in the audio
+    // handler, causing audio-focus interruption events to fire onPause/onPlay
+    // against the builtin instead of the actual remote player.
+    final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
+
+    // Guard: state may have changed while awaiting the settings lookup
+    if (_selectedPlayer == null || _currentTrack == null) return;
+    if (_selectedPlayer!.playerId != selectedPlayerId) return;
 
     final artworkUrl = _api?.getImageUrl(track, size: 512);
     final displayArtist = _trackDisplayArtist(track);
@@ -5033,9 +5062,13 @@ class MusicAssistantProvider with ChangeNotifier {
 
     _cancelIdleServiceTimer();
 
-    // Use updateLocalModeNotification for builtin players to avoid
-    // conflicting mediaItem.add() calls with _updatePlayerState()
-    final isBuiltinPlayer = _sendspinConnected && _pcmAudioPlayer != null;
+    // Use updateLocalModeNotification only when the builtin/Sendspin player is
+    // actually selected. Using it for remote players incorrectly sets
+    // _isBuiltinPlayerActive=true, causing audio interruptions to mis-fire.
+    final isBuiltinPlayer = _sendspinConnected &&
+        _pcmAudioPlayer != null &&
+        builtinPlayerId != null &&
+        _matchesBuiltinId(selectedPlayerId, builtinPlayerId);
     if (isBuiltinPlayer) {
       audioHandler.updateLocalModeNotification(
         item: mediaItem,
