@@ -1020,6 +1020,11 @@ class MusicAssistantAPI {
           'media': [uri],
           'option': 'replace',
         },
+        // Radio stations can take 30-60 s to resolve on the MA server side
+        // (provider lookup, stream URL negotiation). Use a dedicated longer
+        // timeout so that slow stations don't throw a spurious TimeoutException
+        // while the server is still processing the request.
+        timeout: const Duration(seconds: 60),
       );
     } catch (e) {
       _logger.log('Error playing radio station: $e');

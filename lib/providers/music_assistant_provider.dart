@@ -1312,6 +1312,23 @@ class MusicAssistantProvider with ChangeNotifier {
 
       await _tryAdoptGhostPlayer();
       await _registerLocalPlayer();
+
+      // If AA is still physically connected but we just completed a WS
+      // reconnect, the _aaUserOverride flag from the previous WS session
+      // would normally persist (onAAConnected doesn't fire for mere WS
+      // reconnects — AA never disconnected). Without this reset the
+      // Priority-0 auto-switch to the builtin player is silently blocked
+      // because the override condition is still true.
+      // Treat every WS reconnect during an active AA session as a fresh
+      // AA-connect event: clear the override and arm the pending switch.
+      if (_aaSessionActive && audioHandler.isAndroidAutoConnected) {
+        _logger.log(
+          '🚗 WS reconnect during active AA session — resetting _aaUserOverride for fresh builtin switch',
+        );
+        _aaUserOverride = false;
+        _pendingAASwitch = true;
+      }
+
       await _loadAndSelectPlayers(coldStart: true);
 
       loadLibrary();
