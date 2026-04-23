@@ -87,6 +87,8 @@ class MusicAssistantProvider with ChangeNotifier {
   Player? _selectedPlayer;
   List<Player> _availablePlayers = [];
   bool _selectPlayerInProgress = false; // Reentrancy guard for selectPlayer()
+  bool _isLoadingPlayers = false;        // Reentrancy guard for _loadAndSelectPlayers()
+  bool _pendingPlayerRefresh = false;    // Queued re-run when _loadAndSelectPlayers was skipped
   Map<String, String> _castToSendspinIdMap = {}; // Maps regular Cast IDs to Sendspin IDs for grouping
 
   // Pending volume cache: prevents stale API data from overwriting optimistic
@@ -151,6 +153,7 @@ class MusicAssistantProvider with ChangeNotifier {
   // a stream/start — this flag prevents _pcmAudioPlayer.play() from
   // firing until the user explicitly triggers playback again.
   bool _suppressSendspinAutoResume = false;
+  bool _isHandlingStreamStart = false;   // Prevents concurrent _handleSendspinStreamStart
 
   // Guard against concurrent play_media calls (artist radio, playlists, etc.).
   // Subsequent taps while a play_media command is in-flight are dropped so
@@ -2611,6 +2614,13 @@ class MusicAssistantProvider with ChangeNotifier {
   /// 2. Start the foreground service to prevent background throttling
   /// 3. Reset position for new track and start position timer
   void _handleSendspinStreamStart(Map<String, dynamic>? trackInfo) async {
+    // Guard against concurrent invocations (e.g. two _loadAndSelectPlayers runs
+    // both firing onAAConnected at AA bounce, or rapid stream/start events).
+    if (_isHandlingStreamStart) {
+      _logger.log('🎵 Sendspin: stream/start ignored (already handling — concurrent call)');
+      return;
+    }
+    _isHandlingStreamStart = true;
     // Suppress auto-resume after AA disconnect: the phone may reconnect
     // to the MA server on home WiFi and the server sends stream/start for
     // the still-queued track. Without this guard, audio blasts on the phone
@@ -2619,11 +2629,13 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('🎵 Sendspin: Ignoring stream/start (auto-resume suppressed after AA disconnect)');
       // Tell the server to stop sending audio for this player
       _sendspinService?.reportState(playing: false, paused: true);
+      _isHandlingStreamStart = false;
       return;
     }
     final aaDisc = audioHandler.aaDisconnectedAt;
     if (aaDisc != null && DateTime.now().difference(aaDisc).inSeconds < 2) {
       _logger.log('🎵 Sendspin: Ignoring stream/start (AA disconnected ${DateTime.now().difference(aaDisc).inMilliseconds}ms ago)');
+      _isHandlingStreamStart = false;
       return;
     }
     _logger.log('🎵 Sendspin: Stream starting');
@@ -2639,6 +2651,7 @@ class MusicAssistantProvider with ChangeNotifier {
       } else {
         _logger.log('⚠️ Sendspin: Failed to initialize PCM player');
         _sendspinConnected = false;
+        _isHandlingStreamStart = false;
         return;
       }
     }
@@ -2714,11 +2727,19 @@ class MusicAssistantProvider with ChangeNotifier {
     _manageNotificationPositionTimer();
 
     _logger.log('🎵 Sendspin: Foreground service activated for PCM streaming');
+    _isHandlingStreamStart = false;
   }
 
   /// Handle Sendspin stream end - server stopped sending PCM audio data
   /// This is called when audio streaming ends (pause, stop, track end, etc.)
   void _handleSendspinStreamEnd() async {
+    // Guard against duplicate stream/end from the server (MA sends two stream/end
+    // messages during rapid radio switching). If PCM is already paused/stopped,
+    // there is nothing to do.
+    if (_pcmAudioPlayer != null && !_pcmAudioPlayer!.isPlaying) {
+      _logger.log('🎵 Sendspin: Stream ended (duplicate ignored — PCM already stopped)');
+      return;
+    }
     // Use position tracker (server-synced) instead of PCM elapsed time which resets to 0 each stream
     final lastPosition = _positionTracker.currentPosition;
     _logger.log('🎵 Sendspin: Stream ended at position ${lastPosition.inSeconds}s');
@@ -4283,6 +4304,14 @@ class MusicAssistantProvider with ChangeNotifier {
   }
 
   Future<void> _loadAndSelectPlayers({bool forceRefresh = false, bool coldStart = false}) async {
+    // Prevent concurrent executions: if already loading (e.g. onBrowseActivity + refreshPlayers
+    // firing simultaneously at AA bounce), queue a single re-run rather than interleaving.
+    if (_isLoadingPlayers && !coldStart) {
+      if (forceRefresh) _pendingPlayerRefresh = true;
+      return;
+    }
+    _isLoadingPlayers = true;
+    _pendingPlayerRefresh = false;
     try {
       // Don't skip on coldStart - we need to apply full auto-selection priority logic
       if (!forceRefresh &&
@@ -4759,6 +4788,12 @@ class MusicAssistantProvider with ChangeNotifier {
       unawaited(_preloadAdjacentPlayers(preloadAll: true));
     } catch (e) {
       ErrorHandler.logError('Load and select players', e);
+    } finally {
+      _isLoadingPlayers = false;
+      if (_pendingPlayerRefresh) {
+        _pendingPlayerRefresh = false;
+        unawaited(_loadAndSelectPlayers(forceRefresh: true));
+      }
     }
   }
 
