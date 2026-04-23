@@ -73,6 +73,10 @@ class MusicAssistantProvider with ChangeNotifier {
   List<Track> _cachedFavoriteTracks = []; // Cached for instant display before full library loads
   List<Audiobook> _audiobooks = [];
   final Map<String, List<Audiobook>> _seriesAudiobooksCache = {};
+  /// Deduplicates concurrent getArtistAlbumsWithCache calls for the same artist.
+  /// AA sends getChildren('artist|X') twice in quick succession (prefetch + focus);
+  /// without this both calls race to the API before the first can populate the cache.
+  final Map<String, Future<List<Album>>> _inFlightArtistAlbumsFetch = {};
   List<MediaItem> _radioStations = [];
   List<MediaItem> _podcasts = [];
   bool _isLoading = false;
@@ -2012,8 +2016,10 @@ class MusicAssistantProvider with ChangeNotifier {
       // player (race condition at AA connect). Target the builtin player
       // directly to avoid sending play to a BT/ESP32 player that does not
       // support the player_queues/play command (MA error 999).
+      // Also handle the case where _aaSessionActive is still false but AA is
+      // already physically connected (onPlay fires before getChildren sets the flag).
       String? targetPlayerId = _selectedPlayer?.playerId;
-      if (_aaSessionActive) {
+      if (_aaSessionActive || audioHandler.isAndroidAutoConnected) {
         final builtinId = await SettingsService.getBuiltinPlayerId();
         if (builtinId != null) targetPlayerId = builtinId;
       }
@@ -2025,7 +2031,7 @@ class MusicAssistantProvider with ChangeNotifier {
     audioHandler.onPause = () async {
       _logger.log('🎵 Notification: Pause pressed');
       String? targetPlayerId = _selectedPlayer?.playerId;
-      if (_aaSessionActive) {
+      if (_aaSessionActive || audioHandler.isAndroidAutoConnected) {
         final builtinId = await SettingsService.getBuiltinPlayerId();
         if (builtinId != null) targetPlayerId = builtinId;
       }
@@ -4029,6 +4035,24 @@ class MusicAssistantProvider with ChangeNotifier {
 
     if (_api == null) return _cacheService.getCachedArtistAlbums(cacheKey) ?? [];
 
+    // Deduplicate concurrent requests: AA sends getChildren twice in quick
+    // succession (prefetch + focus). Attach to the in-flight future if one
+    // is already running for the same artist instead of making a second API call.
+    if (_inFlightArtistAlbumsFetch.containsKey(cacheKey)) {
+      _logger.log('📦 Joining in-flight fetch for "$artistName"');
+      return _inFlightArtistAlbumsFetch[cacheKey]!;
+    }
+
+    final future = _fetchArtistAlbums(artistName, cacheKey);
+    _inFlightArtistAlbumsFetch[cacheKey] = future;
+    try {
+      return await future;
+    } finally {
+      _inFlightArtistAlbumsFetch.remove(cacheKey);
+    }
+  }
+
+  Future<List<Album>> _fetchArtistAlbums(String artistName, String cacheKey) async {
     try {
       // Ensure library is loaded for artist matching
       if (_albums.isEmpty) {
@@ -6562,7 +6586,18 @@ class MusicAssistantProvider with ChangeNotifier {
         return;
       }
 
-      _logger.log('⏩ AA reconnect: restoring position to ${savedPositionSeconds}s');
+      // Don't seek backwards: if the server kept playing while AA was
+      // disconnected, its current position may already be past the snapshot.
+      // Seeking to savedPositionSeconds would jump backwards and interrupt
+      // the stream. Only seek if the saved position is ahead of the server.
+      final serverPositionSeconds = _positionTracker.currentPosition.inSeconds;
+      if (savedPositionSeconds <= serverPositionSeconds) {
+        _logger.log('⏩ AA reconnect: skipping seek — server ($serverPositionSeconds s) already past snapshot ($savedPositionSeconds s)');
+        await SettingsService.setAALastPosition(playerId, 0);
+        return;
+      }
+
+      _logger.log('⏩ AA reconnect: restoring position to ${savedPositionSeconds}s (server at ${serverPositionSeconds}s)');
       await seek(playerId, savedPositionSeconds);
       // Clear saved position after restore so it doesn't apply to subsequent sessions
       await SettingsService.setAALastPosition(playerId, 0);

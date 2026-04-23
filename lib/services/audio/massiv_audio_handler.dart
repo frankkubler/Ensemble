@@ -407,7 +407,14 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   /// Re-broadcast current playback state to update custom action icons (AA)
   void _refreshPlaybackState() {
     final current = playbackState.value;
+    // Never propagate an error state via a refresh — if the player is
+    // now playing (e.g. after a transient playTracks timeout), the error
+    // banner would persist until the next explicit _clearErrorState call.
+    final processingState = current.processingState == AudioProcessingState.error
+        ? AudioProcessingState.ready
+        : current.processingState;
     playbackState.add(current.copyWith(
+      processingState: processingState,
       controls: _controls,
       systemActions: const {
         MediaAction.play,
@@ -913,17 +920,43 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     try {
       if (mediaId.startsWith('artistradio|')) {
         final artistName = mediaId.substring('artistradio|'.length);
-        final artist = SyncService.instance.cachedArtists
-            .where((a) => a.name == artistName)
-            .firstOrNull;
+        // Check library cache first, then fall back to browsed-artist cache
+        // (populated in buildArtistAlbums for non-library artists like Discover results).
+        final artist = _browsing.getArtistByName(artistName);
         if (artist == null) {
-          _logger.log('AndroidAuto: Artist radio: artist "$artistName" not found');
+          _logger.log('AndroidAuto: Artist radio: artist "$artistName" not found in library or browsed cache');
+          _setErrorState('Artist not found');
           return;
         }
         _logger.log('AndroidAuto: Starting artist radio for "$artistName"');
-        await provider.api?.playArtistRadio(playerId, artist);
-        await provider.api?.resumePlayer(playerId);
-        _refreshQueueAfterDelay(provider, playerId);
+        // Fire play_media immediately and poll for queue readiness rather than
+        // awaiting the WebSocket ACK (which can take 30-40s with Spotify radio).
+        // The server builds the queue in ~2s; call resumePlayer as soon as
+        // items appear — reduces perceived audio delay from ~40s to ~3s.
+        unawaited(provider.api?.playArtistRadio(playerId, artist).catchError((e) {
+          _logger.log('AndroidAuto: playArtistRadio background error (non-fatal): $e');
+        }));
+        bool resumed = false;
+        for (var i = 0; i < 15; i++) {
+          await Future.delayed(const Duration(seconds: 1));
+          try {
+            final q = await provider.getQueue(playerId);
+            if (q != null && q.items.isNotEmpty) {
+              _logger.log('AndroidAuto: Artist radio queue ready after ${i + 1}s — resuming');
+              await provider.api?.resumePlayer(playerId);
+              _refreshQueueAfterDelay(provider, playerId);
+              resumed = true;
+              break;
+            }
+          } catch (e) {
+            _logger.log('AndroidAuto: queue poll error: $e');
+          }
+        }
+        if (!resumed) {
+          _logger.log('AndroidAuto: queue not ready after 15s — resuming anyway');
+          await provider.api?.resumePlayer(playerId);
+          _refreshQueueAfterDelay(provider, playerId);
+        }
         return;
       }
 

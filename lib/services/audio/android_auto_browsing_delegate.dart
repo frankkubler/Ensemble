@@ -23,10 +23,25 @@ class AndroidAutoBrowsingDelegate {
   /// visible from [playFromMediaId].
   final Map<String, List<ma.Track>> trackCache;
 
+  /// Cache for non-library artists browsed via AA (e.g. Discover, Search).
+  /// Populated in [buildArtistAlbums]; used as fallback in playFromMediaId
+  /// when the artist is not in SyncService.cachedArtists (library-only).
+  final Map<String, ma.Artist> _browsedArtistCache = {};
+
   AndroidAutoBrowsingDelegate({
     required DebugLogger logger,
     required this.trackCache,
   }) : _logger = logger;
+
+  /// Look up an artist by name, checking library cache first then browsed cache.
+  ma.Artist? getArtistByName(String name) {
+    final lower = name.toLowerCase();
+    final libArtist = SyncService.instance.cachedArtists
+        .where((a) => a.name.toLowerCase() == lower)
+        .firstOrNull;
+    if (libArtist != null) return libArtist;
+    return _browsedArtistCache[lower];
+  }
 
   // ---------------------------------------------------------------------------
   // Media ID constants — root categories
@@ -399,6 +414,22 @@ class AndroidAutoBrowsingDelegate {
     var albums = await provider.getArtistAlbumsWithCache(artistName);
     if (albums.isEmpty) albums = provider.getArtistAlbumsFromLibrary(artistName);
     _logger.log('AndroidAuto: Artist "$artistName" albums: ${albums.length}');
+
+    // Cache the Artist object from the first album's artists list so that
+    // playFromMediaId can resolve non-library artists (e.g. Discover results)
+    // that are not in SyncService.cachedArtists.
+    final lower = artistName.toLowerCase();
+    if (!_browsedArtistCache.containsKey(lower)) {
+      final artistFromAlbum = albums
+          .expand((a) => a.artists ?? <ma.Artist>[])
+          .where((a) => a.name.toLowerCase() == lower)
+          .firstOrNull;
+      if (artistFromAlbum != null) {
+        _browsedArtistCache[lower] = artistFromAlbum;
+        _logger.log('AndroidAuto: Cached browsed artist "$artistName" (provider=${artistFromAlbum.provider})');
+      }
+    }
+
     return [
       MediaItem(id: 'artistradio|$artistName', title: 'Start Radio', artUri: iconRadio, playable: true),
       ...albums.map((a) => MediaItem(
