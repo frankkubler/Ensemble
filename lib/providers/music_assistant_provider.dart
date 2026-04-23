@@ -6311,19 +6311,13 @@ class MusicAssistantProvider with ChangeNotifier {
     _isStartingPlayMedia = true;
     _suppressSendspinAutoResume = false;
 
-    // Optimistic local stop: cut the current audio immediately so the user
-    // hears a clear break even while the server resolves the artist radio.
-    // This mirrors the same pattern used in nextTrack().
-    try {
-      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
-      if (builtinPlayerId != null && playerId == builtinPlayerId && _sendspinConnected) {
-        _logger.log('⏭️ Non-blocking local stop for artist radio on builtin player');
-        unawaited((_pcmAudioPlayer?.pause() ?? Future.value()).catchError(
-          (e) => _logger.log('⚠️ PCM pause error on radio start (non-blocking): $e'),
-        ));
-        _sendspinService?.reportState(playing: false, paused: true);
-      }
-    } catch (_) {}
+    // Do NOT issue a local PCM stop here. Unlike nextTrack() which resolves in
+    // < 2 seconds, Spotify artist radio can take 20–90 s on the server side.
+    // Stopping the PCM player immediately causes a long silence because MA
+    // sends the first radio frames directly (no stream/start event) within the
+    // existing Sendspin session — the PCM player would never know to resume.
+    // Leaving the player running lets the old audio fade out naturally and the
+    // new radio frames start playing as soon as the server resolves them.
 
     try {
       await _api?.playArtistRadio(playerId, artist);
