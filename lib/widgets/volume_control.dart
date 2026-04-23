@@ -184,12 +184,16 @@ class _VolumeControlState extends State<VolumeControl> {
 
     _isLocalPlayer = _localPlayerId != null && player.playerId == _localPlayerId;
 
-    // Use pending volume during drag or button tap to prevent stale state issues
+    // Use pending volume during drag or button tap to prevent stale state issues.
+    // For the local player, prefer _systemVolume (actual Android media volume) over
+    // maLocalVolume (MA server-stored value, defaults to 100 until first sync).
+    // This prevents the slider showing 100% at startup when system volume is e.g. 30%.
+    final localVolume = _isLocalPlayer
+        ? (_systemVolume ?? maLocalVolume / 100.0)
+        : player.volume.toDouble() / 100.0;
     final currentVolume = (_isDragging || _showButtonIndicator)
-        ? (_pendingVolume ?? (_isLocalPlayer ? maLocalVolume / 100.0 : player.volume.toDouble() / 100.0))
-        : _isLocalPlayer
-            ? maLocalVolume / 100.0
-            : player.volume.toDouble() / 100.0;
+        ? (_pendingVolume ?? localVolume)
+        : localVolume;
 
     // Use accent color if provided, otherwise fall back to theme primary
     final accentColor = widget.accentColor ?? Theme.of(context).colorScheme.primary;

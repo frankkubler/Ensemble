@@ -2748,6 +2748,23 @@ class MusicAssistantProvider with ChangeNotifier {
 
   void _startReportingLocalPlayerState() {
     _localPlayerStateReportTimer?.cancel();
+    // Sync _localPlayerVolume with the actual system media volume before the first
+    // periodic report. The field is initialised to 100 as a safe default, but the
+    // real system level may be much lower. Without this sync:
+    //  - the slider shows 100% at startup even when system volume is e.g. 30%
+    //  - the first slider interaction is needed to "activate" the real volume
+    //  - MA receives 100% in the first reportState and stores it, causing the
+    //    player to appear at max volume in the MA web UI and other clients.
+    FlutterVolumeController.getVolume().then((systemVolume) {
+      if (systemVolume != null) {
+        final systemVolumeInt = (systemVolume * 100).round();
+        if (systemVolumeInt != _localPlayerVolume) {
+          _logger.log('🔊 Syncing local player volume from system: $_localPlayerVolume → $systemVolumeInt%');
+          _localPlayerVolume = systemVolumeInt;
+          notifyListeners();
+        }
+      }
+    });
     _localPlayerStateReportTimer = Timer.periodic(Timings.localPlayerReportInterval, (_) async {
       try {
         await _reportLocalPlayerState();
