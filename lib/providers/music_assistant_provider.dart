@@ -4711,7 +4711,11 @@ class MusicAssistantProvider with ChangeNotifier {
 
         // If AA connected before the player list was ready, resolve the pending
         // switch now that _availablePlayers is fully populated.
-        if (_pendingAASwitch) {
+        if (_pendingAASwitch && !_aaUserOverride) {
+          // Only resolve the pending switch if the user has not explicitly overridden
+          // the player selection (e.g. resumed SOUNDBAR_BT from the car screen). If
+          // _aaUserOverride=true the user's choice must be respected — do not force
+          // the builtin player here.
           final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
           if (builtinPlayerId != null) {
             final builtin = _availablePlayers.cast<Player?>().firstWhere(
@@ -4754,6 +4758,7 @@ class MusicAssistantProvider with ChangeNotifier {
       // session, suppress the Priority-0 AA override so the selection sticks.
       if (fromUserGesture && _aaSessionActive) {
         _aaUserOverride = true;
+        _pendingAASwitch = false; // User has made an explicit choice — cancel any pending builtin switch
         _logger.log('👤 User override: selectPlayer(${player.name}) during AA session');
       }
 
@@ -6390,6 +6395,7 @@ class MusicAssistantProvider with ChangeNotifier {
     // AA session, suppress the AA Priority-0 override so the selection sticks.
     if (fromUserGesture && _aaSessionActive) {
       _aaUserOverride = true;
+      _pendingAASwitch = false; // User has made an explicit choice — cancel any pending builtin switch
       _logger.log('👤 User override: resumePlayer($playerId) during AA session');
     }
 
