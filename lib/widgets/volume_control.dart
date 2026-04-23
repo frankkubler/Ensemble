@@ -240,6 +240,11 @@ class _VolumeControlState extends State<VolumeControl> {
                     GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onHorizontalDragStart: (details) {
+                        // Suppress Android native volume UI during in-app slider drag.
+                        // Physical buttons will still show the native UI.
+                        if (_isLocalPlayer) {
+                          unawaited(FlutterVolumeController.updateShowSystemUI(false));
+                        }
                         setState(() {
                           _isDragging = true;
                           _pendingVolume = currentVolume;
@@ -314,6 +319,10 @@ class _VolumeControlState extends State<VolumeControl> {
                           _isDragging = false;
                           _pendingVolume = null;
                         });
+                        // Restore native volume UI for physical button presses
+                        if (_isLocalPlayer) {
+                          unawaited(FlutterVolumeController.updateShowSystemUI(true));
+                        }
                       },
                       // Custom slider track (no Overlay needed - Flutter 3.38 Slider uses OverlayPortal)
                       child: SizedBox(
