@@ -5773,6 +5773,8 @@ class MusicAssistantProvider with ChangeNotifier {
 
     // Listen for sync completion to update our lists
     void onSyncComplete() {
+      // Always remove first so a failed sync doesn't accumulate stale listeners.
+      syncService.removeListener(onSyncComplete);
       if (syncService.status == SyncStatus.completed) {
         _albums = syncService.cachedAlbums;
         _artists = syncService.cachedArtists;
@@ -5788,7 +5790,6 @@ class MusicAssistantProvider with ChangeNotifier {
           'cat|artists', 'cat|albums', 'cat|playlists', 'cat|home',
         ]);
       }
-      syncService.removeListener(onSyncComplete);
     }
 
     syncService.addListener(onSyncComplete);
@@ -7109,6 +7110,7 @@ class MusicAssistantProvider with ChangeNotifier {
     _playerStateTimer?.cancel();
     _notificationPositionTimer?.cancel();
     _localPlayerStateReportTimer?.cancel();
+    _aaDisconnectDebounceTimer?.cancel();
     _sleepTimerProvider.dispose();
     _idleServiceTimer?.cancel();
     _localPlayerEventSubscription?.cancel();
