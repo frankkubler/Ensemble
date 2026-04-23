@@ -1022,13 +1022,33 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           _logger.log('AndroidAuto: no API, cannot play radio');
           return;
         }
-        final station = provider.radioStations.firstWhere(
-          (s) => s.provider == parts[1] && s.itemId == parts[2],
-          orElse: () => provider.radioStationsUnfiltered.firstWhere(
-            (s) => s.provider == parts[1] && s.itemId == parts[2],
-            orElse: () => throw Exception('Radio station not found: $mediaId'),
-          ),
-        );
+        // Try the already-cached list first. If the station is not found
+        // (e.g. the player was idle and stations haven't been fetched yet),
+        // trigger a fresh load and search again before giving up.
+        ma.MediaItem? _findStation() {
+          try {
+            return provider.radioStations.firstWhere(
+              (s) => s.provider == parts[1] && s.itemId == parts[2],
+            );
+          } catch (_) {}
+          try {
+            return provider.radioStationsUnfiltered.firstWhere(
+              (s) => s.provider == parts[1] && s.itemId == parts[2],
+            );
+          } catch (_) {
+            return null;
+          }
+        }
+
+        var station = _findStation();
+        if (station == null) {
+          _logger.log('AndroidAuto: radio station not in cache, loading stations…');
+          await provider.loadRadioStations();
+          station = _findStation();
+        }
+        if (station == null) {
+          throw Exception('Radio station not found: $mediaId');
+        }
         await provider.api!.playRadioStation(playerId, station);
         await provider.api!.resumePlayer(playerId);
         return;
