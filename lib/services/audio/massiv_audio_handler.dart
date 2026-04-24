@@ -933,6 +933,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         // awaiting the WebSocket ACK (which can take 30-40s with Spotify radio).
         // The server builds the queue in ~2s; call resumePlayer as soon as
         // items appear — reduces perceived audio delay from ~40s to ~3s.
+        // Silence local PCM immediately so the old track stops while we wait.
+        provider.silenceLocalPcm();
         unawaited(provider.api?.playArtistRadio(playerId, artist).catchError((e) {
           _logger.log('AndroidAuto: playArtistRadio background error (non-fatal): $e');
         }));
@@ -942,7 +944,10 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           try {
             final q = await provider.getQueue(playerId);
             if (q != null && q.items.isNotEmpty) {
-              _logger.log('AndroidAuto: Artist radio queue ready after ${i + 1}s — resuming');
+              _logger.log('AndroidAuto: Artist radio queue ready after ${i + 1}s — seeking to 0 then resuming');
+              // Seek to 0 to restart the track from the beginning — the server
+              // may have already advanced a few seconds while the queue was building.
+              await provider.api?.seek(playerId, 0);
               await provider.api?.resumePlayer(playerId);
               _refreshQueueAfterDelay(provider, playerId);
               resumed = true;
@@ -1049,8 +1054,47 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         if (station == null) {
           throw Exception('Radio station not found: $mediaId');
         }
-        await provider.api!.playRadioStation(playerId, station);
-        await provider.api!.resumePlayer(playerId);
+        // Silence local PCM immediately so the user does not hear up to 30s of
+        // the old buffered track while the server switches to the new radio stream.
+        // The new stream/start event will resume playback when the server is ready.
+        provider.silenceLocalPcm();
+        // Fire play_media in the background without awaiting the ACK.
+        // The server ACK for radio stations can take 30-60 s (stream URL
+        // resolution + buffering). Calling resumePlayer as soon as the server
+        // has processed the command (queue item appears, ~2-3 s) reduces the
+        // perceived startup delay from ~30 s to ~3-5 s — same technique used
+        // for artist radio.
+        unawaited(provider.api!.playRadioStation(playerId, station).catchError((e) {
+          _logger.log('AndroidAuto: playRadioStation background error (non-fatal): $e');
+        }));
+        bool resumed = false;
+        for (var i = 0; i < 15; i++) {
+          await Future.delayed(const Duration(seconds: 1));
+          try {
+            final q = await provider.getQueue(playerId);
+            if (q != null && q.items.isNotEmpty) {
+              _logger.log('AndroidAuto: Radio queue ready after ${i + 1}s — resuming');
+              await provider.api!.resumePlayer(playerId);
+              _refreshQueueAfterDelay(provider, playerId);
+              resumed = true;
+              break;
+            }
+          } catch (e) {
+            _logger.log('AndroidAuto: radio queue poll error: $e');
+          }
+          // Fallback: live radio stations may not pre-populate queue items;
+          // resume after 5 s so the server starts Sendspin streaming promptly.
+          if (i >= 4) {
+            _logger.log('AndroidAuto: Radio — resuming after ${i + 1}s (live stream, no queue items)');
+            await provider.api!.resumePlayer(playerId);
+            resumed = true;
+            break;
+          }
+        }
+        if (!resumed) {
+          _logger.log('AndroidAuto: Radio — fallback resume');
+          await provider.api!.resumePlayer(playerId);
+        }
         return;
       }
 

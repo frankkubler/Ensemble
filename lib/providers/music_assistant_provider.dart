@@ -789,6 +789,19 @@ class MusicAssistantProvider with ChangeNotifier {
   /// Whether PCM audio is currently playing via Sendspin
   bool get isPcmPlaying => _sendspinConnected && _pcmAudioPlayer != null && _pcmAudioPlayer!.isPlaying;
 
+  /// Immediately silence local PCM audio without sending any command to the server.
+  /// Use before switching tracks/stations so the user does not hear the old track
+  /// while the server flushes its PCM buffer (~30 s for buffered file playback).
+  /// The new stream/start event will resume playback once the server is ready.
+  void silenceLocalPcm() {
+    if (_sendspinConnected && _pcmAudioPlayer != null && _pcmAudioPlayer!.isPlaying) {
+      _logger.log('🔇 silenceLocalPcm: pausing PCM to silence old track during switch');
+      unawaited(_pcmAudioPlayer!.pause().catchError(
+        (e) => _logger.log('⚠️ silenceLocalPcm error: $e'),
+      ));
+    }
+  }
+
   /// Get current PCM audio format info (when using Sendspin)
   /// Returns null if not using Sendspin PCM streaming
   String? get currentAudioFormat {
