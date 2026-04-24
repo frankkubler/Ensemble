@@ -570,8 +570,12 @@ class PcmAudioPlayer {
     _stopElapsedTimeTimer();
 
     // Schedule release() to clear native buffer - use Future.delayed to yield control
-    // This allows UI to update before the potentially blocking release() call
+    // This allows UI to update before the potentially blocking release() call.
+    // Guard: if play() was called for the next stream before this lambda runs
+    // (rapid track transition / next button), skip the release to avoid cutting
+    // the new stream's audio.
     unawaited(Future.delayed(Duration.zero, () async {
+      if (_state != PcmPlayerState.paused) return;
       try {
         await pcm.FlutterPcmSound.release().timeout(
           const Duration(milliseconds: 500),

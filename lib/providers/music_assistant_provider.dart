@@ -2037,11 +2037,33 @@ class MusicAssistantProvider with ChangeNotifier {
     // Wire up notification button callbacks
     audioHandler.onSkipToNext = () {
       _logger.log('🎵 Notification: Skip to next pressed');
-      nextTrackSelectedPlayer();
+      // Mirror the AA-aware builtin-player routing used for onPlay/onPause so
+      // the next command always targets the correct player during a car session.
+      unawaited(() async {
+        String? targetPlayerId = _selectedPlayer?.playerId;
+        if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
+          final builtinId = await SettingsService.getBuiltinPlayerId();
+          if (builtinId != null) targetPlayerId = builtinId;
+        }
+        if (targetPlayerId == null) return;
+        await nextTrack(targetPlayerId);
+        await Future.delayed(Timings.trackChangeDelay);
+        await _updatePlayerState();
+      }().catchError((e) => _logger.log('⚠️ skipToNext error: $e')));
     };
     audioHandler.onSkipToPrevious = () {
       _logger.log('🎵 Notification: Skip to previous pressed');
-      previousTrackSelectedPlayer();
+      unawaited(() async {
+        String? targetPlayerId = _selectedPlayer?.playerId;
+        if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
+          final builtinId = await SettingsService.getBuiltinPlayerId();
+          if (builtinId != null) targetPlayerId = builtinId;
+        }
+        if (targetPlayerId == null) return;
+        await previousTrack(targetPlayerId);
+        await Future.delayed(Timings.trackChangeDelay);
+        await _updatePlayerState();
+      }().catchError((e) => _logger.log('⚠️ skipToPrevious error: $e')));
     };
     audioHandler.onPlay = () async {
       _logger.log('🎵 Notification: Play pressed');
@@ -2634,6 +2656,7 @@ class MusicAssistantProvider with ChangeNotifier {
       return;
     }
     _isHandlingStreamStart = true;
+    try {
     // Suppress auto-resume after AA disconnect: the phone may reconnect
     // to the MA server on home WiFi and the server sends stream/start for
     // the still-queued track. Without this guard, audio blasts on the phone
@@ -2642,13 +2665,11 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('🎵 Sendspin: Ignoring stream/start (auto-resume suppressed after AA disconnect)');
       // Tell the server to stop sending audio for this player
       _sendspinService?.reportState(playing: false, paused: true);
-      _isHandlingStreamStart = false;
       return;
     }
     final aaDisc = audioHandler.aaDisconnectedAt;
     if (aaDisc != null && DateTime.now().difference(aaDisc).inSeconds < 2) {
       _logger.log('🎵 Sendspin: Ignoring stream/start (AA disconnected ${DateTime.now().difference(aaDisc).inMilliseconds}ms ago)');
-      _isHandlingStreamStart = false;
       return;
     }
     _logger.log('🎵 Sendspin: Stream starting');
@@ -2664,7 +2685,6 @@ class MusicAssistantProvider with ChangeNotifier {
       } else {
         _logger.log('⚠️ Sendspin: Failed to initialize PCM player');
         _sendspinConnected = false;
-        _isHandlingStreamStart = false;
         return;
       }
     }
@@ -2740,7 +2760,9 @@ class MusicAssistantProvider with ChangeNotifier {
     _manageNotificationPositionTimer();
 
     _logger.log('🎵 Sendspin: Foreground service activated for PCM streaming');
-    _isHandlingStreamStart = false;
+    } finally {
+      _isHandlingStreamStart = false;
+    }
   }
 
   /// Handle Sendspin stream end - server stopped sending PCM audio data
