@@ -155,6 +155,13 @@ class MusicAssistantProvider with ChangeNotifier {
   bool _suppressSendspinAutoResume = false;
   bool _isHandlingStreamStart = false;   // Prevents concurrent _handleSendspinStreamStart
 
+  // Grace period after AA reconnects: blocks server-pushed stream/start for 3 s.
+  // The MA server may automatically resume the Sendspin player as soon as it
+  // reconnects; we want to ignore those auto-pushes until the AA reconnect
+  // handshake is complete and the user deliberately presses play.
+  // Cleared immediately when the user explicitly calls resumePlayer().
+  DateTime? _aaReconnectGraceUntil;
+
   // Guard against concurrent play_media calls (artist radio, playlists, etc.).
   // Subsequent taps while a play_media command is in-flight are dropped so
   // they don't stack up when the server is slow to respond.
@@ -2082,7 +2089,14 @@ class MusicAssistantProvider with ChangeNotifier {
       }
       if (targetPlayerId != null) {
         resumePlayer(targetPlayerId, fromUserGesture: true);
-        unawaited(refreshPlayers());
+        // Skip the player-list refresh when AA is mid-reconnect (_pendingAASwitch):
+        // _loadAndSelectPlayers will run anyway from onAAConnected, and an extra
+        // concurrent refresh only causes state-race noise in the logs.
+        if (!_pendingAASwitch) {
+          unawaited(refreshPlayers());
+        } else {
+          _logger.log('🎵 onPlay: skipping refreshPlayers — AA switch still pending');
+        }
       }
     };
     audioHandler.onPause = () async {
@@ -2130,6 +2144,11 @@ class MusicAssistantProvider with ChangeNotifier {
         // just ensure pending switch is set and continue.
       }
       _suppressSendspinAutoResume = false;
+      // Block server-pushed stream/start for 3 s while the reconnect handshake
+      // (player switch + queue restoration) completes. An explicit resumePlayer()
+      // call by the user clears this grace period early.
+      _aaReconnectGraceUntil = DateTime.now().add(const Duration(seconds: 3));
+      _logger.log('🚗 AA reconnect: Sendspin grace period started (3 s)');
       // Mark pending BEFORE the async gap below — if _loadAndSelectPlayers
       // runs during the await it must NOT treat the pre-AA selection (e.g.
       // SOUNDBAR_BT) as a deliberate user choice (Exception 2 in Priority-0).
@@ -2553,6 +2572,16 @@ class MusicAssistantProvider with ChangeNotifier {
       _sendspinService?.reportState(playing: false, paused: true);
       return;
     }
+    // Block server-pushed play commands during the AA reconnect grace period.
+    // The MA server may auto-resume the Sendspin player when it comes back online
+    // during an AA session bounce; we must not blast audio before AA is ready.
+    final graceUntil = _aaReconnectGraceUntil;
+    if (graceUntil != null && DateTime.now().isBefore(graceUntil)) {
+      final remainingMs = graceUntil.difference(DateTime.now()).inMilliseconds;
+      _logger.log('🎵 Sendspin: Ignoring play command (AA reconnect grace period — ${remainingMs}ms remaining)');
+      _sendspinService?.reportState(playing: false, paused: true);
+      return;
+    }
     _logger.log('🎵 Sendspin: Play command received');
 
     try {
@@ -2664,6 +2693,14 @@ class MusicAssistantProvider with ChangeNotifier {
     if (_suppressSendspinAutoResume) {
       _logger.log('🎵 Sendspin: Ignoring stream/start (auto-resume suppressed after AA disconnect)');
       // Tell the server to stop sending audio for this player
+      _sendspinService?.reportState(playing: false, paused: true);
+      return;
+    }
+    // Block server-pushed stream/start during the AA reconnect grace period.
+    final graceUntil = _aaReconnectGraceUntil;
+    if (graceUntil != null && DateTime.now().isBefore(graceUntil)) {
+      final remainingMs = graceUntil.difference(DateTime.now()).inMilliseconds;
+      _logger.log('🎵 Sendspin: Ignoring stream/start (AA reconnect grace period — ${remainingMs}ms remaining)');
       _sendspinService?.reportState(playing: false, paused: true);
       return;
     }
@@ -6373,10 +6410,42 @@ class MusicAssistantProvider with ChangeNotifier {
 
   Future<void> playRadio(String playerId, Track track) async {
     _suppressSendspinAutoResume = false;
-    try {
-      await _api?.playRadio(playerId, track);
-    } catch (e) {
-      _logger.log('Radio failed, falling back to single track: $e');
+    _aaReconnectGraceUntil = null; // User-initiated — allow Sendspin audio immediately
+    final api = _api;
+    if (api == null) return;
+
+    // Fire-and-poll: send play_media in the background and resume as soon as
+    // the queue is populated (~2-5 s). Awaiting the ACK can block 20-90 s for
+    // Spotify radio while the server resolves the stream URL.
+    // Silence the local PCM immediately so the old track stops; new audio
+    // will arrive via stream/start once the server is ready.
+    silenceLocalPcm();
+
+    bool fallbackNeeded = false;
+    unawaited(api.playRadio(playerId, track).catchError((e) {
+      _logger.log('Radio failed (background): $e');
+      fallbackNeeded = true;
+    }));
+
+    bool resumed = false;
+    for (var i = 0; i < 15; i++) {
+      await Future.delayed(const Duration(seconds: 1));
+      if (fallbackNeeded) break;
+      try {
+        final q = await getQueue(playerId);
+        if (q != null && q.items.isNotEmpty) {
+          _logger.log('🎵 Radio queue ready after ${i + 1}s — resuming');
+          await api.resumePlayer(playerId);
+          resumed = true;
+          break;
+        }
+      } catch (e) {
+        _logger.log('🎵 Radio queue poll error: $e');
+      }
+    }
+
+    if (fallbackNeeded) {
+      _logger.log('🎵 Radio failed, falling back to single track');
       try {
         await playTrack(playerId, track);
       } catch (fallbackError) {
@@ -6384,8 +6453,10 @@ class MusicAssistantProvider with ChangeNotifier {
         _error = errorInfo.userMessage;
         ErrorHandler.logError('Play radio fallback', fallbackError);
         notifyListeners();
-        rethrow;
       }
+    } else if (!resumed) {
+      _logger.log('🎵 Radio queue not ready after 15s — resuming anyway');
+      await api.resumePlayer(playerId);
     }
   }
 
@@ -6397,32 +6468,64 @@ class MusicAssistantProvider with ChangeNotifier {
     }
     _isStartingPlayMedia = true;
     _suppressSendspinAutoResume = false;
+    _aaReconnectGraceUntil = null; // User-initiated — allow Sendspin audio immediately
+    final api = _api;
+    if (api == null) {
+      _isStartingPlayMedia = false;
+      return;
+    }
 
-    // Do NOT issue a local PCM stop here. Unlike nextTrack() which resolves in
-    // < 2 seconds, Spotify artist radio can take 20–90 s on the server side.
-    // Stopping the PCM player immediately causes a long silence because MA
-    // sends the first radio frames directly (no stream/start event) within the
-    // existing Sendspin session — the PCM player would never know to resume.
-    // Leaving the player running lets the old audio fade out naturally and the
-    // new radio frames start playing as soon as the server resolves them.
+    // Fire-and-poll: send play_media in the background (Spotify radio ACK can
+    // take 20-90 s). Silence local PCM immediately so the old track stops, then
+    // poll the queue and resume as soon as items appear (~2-5 s).
+    silenceLocalPcm();
 
+    bool fallbackNeeded = false;
+    Object? backgroundError;
+    unawaited(api.playArtistRadio(playerId, artist).catchError((e) {
+      _logger.log('Artist radio failed (background): $e');
+      fallbackNeeded = true;
+      backgroundError = e;
+    }));
+
+    bool resumed = false;
     try {
-      await _api?.playArtistRadio(playerId, artist);
-    } catch (e) {
-      _logger.log('Artist radio failed, falling back to shuffled tracks: $e');
-      try {
-        final results = await searchWithCache(artist.name);
-        final tracks = (results['tracks'] ?? []).whereType<Track>().toList();
-        if (tracks.isEmpty) rethrow;
-        tracks.shuffle(Random());
-        await _api?.playTracks(playerId, tracks, startIndex: 0);
-        await _api?.toggleShuffle(playerId, true);
-      } catch (fallbackError) {
-        final errorInfo = ErrorHandler.handleError(fallbackError, context: 'Play artist radio fallback');
-        _error = errorInfo.userMessage;
-        ErrorHandler.logError('Play artist radio fallback', fallbackError);
-        notifyListeners();
-        rethrow;
+      for (var i = 0; i < 15; i++) {
+        await Future.delayed(const Duration(seconds: 1));
+        if (fallbackNeeded) break;
+        try {
+          final q = await getQueue(playerId);
+          if (q != null && q.items.isNotEmpty) {
+            _logger.log('🎵 Artist radio queue ready after ${i + 1}s — resuming');
+            await api.resumePlayer(playerId);
+            resumed = true;
+            break;
+          }
+        } catch (e) {
+          _logger.log('🎵 Artist radio queue poll error: $e');
+        }
+      }
+
+      if (fallbackNeeded) {
+        _logger.log('Artist radio failed, falling back to shuffled tracks');
+        try {
+          final results = await searchWithCache(artist.name);
+          final tracks = (results['tracks'] ?? []).whereType<Track>().toList();
+          if (tracks.isEmpty) {
+            throw backgroundError ?? Exception('No tracks found for fallback');
+          }
+          tracks.shuffle(Random());
+          await api.playTracks(playerId, tracks, startIndex: 0);
+          await api.toggleShuffle(playerId, true);
+        } catch (fallbackError) {
+          final errorInfo = ErrorHandler.handleError(fallbackError, context: 'Play artist radio fallback');
+          _error = errorInfo.userMessage;
+          ErrorHandler.logError('Play artist radio fallback', fallbackError);
+          notifyListeners();
+        }
+      } else if (!resumed) {
+        _logger.log('🎵 Artist radio queue not ready after 15s — resuming anyway');
+        await api.resumePlayer(playerId);
       }
     } finally {
       _isStartingPlayMedia = false;
@@ -6497,6 +6600,12 @@ class MusicAssistantProvider with ChangeNotifier {
         (playerId == builtinIdForResume ||
          _matchesBuiltinId(playerId, builtinIdForResume))) {
       _suppressSendspinAutoResume = false;
+      // Also clear the AA reconnect grace period — the user has explicitly
+      // requested playback so server-pushed audio is now welcome.
+      if (_aaReconnectGraceUntil != null) {
+        _logger.log('🚗 Sendspin grace period cleared by explicit resumePlayer()');
+        _aaReconnectGraceUntil = null;
+      }
     }
     try {
       // For resume, we let MA handle it since it needs to restart the stream

@@ -159,6 +159,15 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               _logger.log('🔊 Audio interruption ended but was not playing before');
               break;
             }
+            // Don't auto-resume during an AA session — AA manages its own play
+            // state and is the one that caused the audio route change in the
+            // first place. Auto-resuming here would trigger a spurious onPlay
+            // callback that starts playback before AA has completed its reconnect
+            // handshake, producing unintended music playback.
+            if (_isAndroidAutoConnected) {
+              _logger.log('🔊 Audio interruption ended but AA session active — skipping auto-resume');
+              break;
+            }
             _player.play();
             onPlay?.call();
             break;
