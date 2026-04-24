@@ -6728,16 +6728,11 @@ class MusicAssistantProvider with ChangeNotifier {
 
   Future<void> nextTrack(String playerId) async {
     try {
-      // Optimistic local stop for builtin player on skip - non-blocking
-      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
-      if (builtinPlayerId != null && playerId == builtinPlayerId && _sendspinConnected) {
-        _logger.log('⏭️ Non-blocking local stop for skip on builtin player');
-        // Stop current audio immediately - fire and forget, but log errors
-        unawaited((_pcmAudioPlayer?.pause() ?? Future.value()).catchError(
-          (e) => _logger.log('⚠️ PCM pause error on next (non-blocking): $e'),
-        ));
-        // Don't stop just_audio - not used for Sendspin audio output
-      }
+      // Do NOT pause PCM here: Sendspin is a continuous stream — the server does
+      // not send a stream/start between tracks in a queue. Calling pause() would
+      // set _userPaused=true, which blocks _onAudioData from processing the new
+      // track's audio until the next explicit stream/start (which may never come
+      // for in-queue skips), causing prolonged silence.
       await _api?.nextTrack(playerId);
     } catch (e) {
       ErrorHandler.logError('Next track', e);
@@ -6747,16 +6742,7 @@ class MusicAssistantProvider with ChangeNotifier {
 
   Future<void> previousTrack(String playerId) async {
     try {
-      // Optimistic local stop for builtin player on previous - non-blocking
-      final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
-      if (builtinPlayerId != null && playerId == builtinPlayerId && _sendspinConnected) {
-        _logger.log('⏮️ Non-blocking local stop for previous on builtin player');
-        // Stop current audio immediately - fire and forget, but log errors
-        unawaited((_pcmAudioPlayer?.pause() ?? Future.value()).catchError(
-          (e) => _logger.log('⚠️ PCM pause error on previous (non-blocking): $e'),
-        ));
-        // Don't stop just_audio - not used for Sendspin audio output
-      }
+      // Same reasoning as nextTrack — do NOT pause PCM for Sendspin in-queue skips.
       await _api?.previousTrack(playerId);
     } catch (e) {
       ErrorHandler.logError('Previous track', e);

@@ -944,10 +944,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           try {
             final q = await provider.getQueue(playerId);
             if (q != null && q.items.isNotEmpty) {
-              _logger.log('AndroidAuto: Artist radio queue ready after ${i + 1}s — seeking to 0 then resuming');
-              // Seek to 0 to restart the track from the beginning — the server
-              // may have already advanced a few seconds while the queue was building.
-              await provider.api?.seek(playerId, 0);
+              _logger.log('AndroidAuto: Artist radio queue ready after ${i + 1}s — resuming');
+              // Do NOT seek(0): it triggers an extra stream/end + stream/start cycle,
+              // causing audible stuttering. The server already starts the queue from 0.
               await provider.api?.resumePlayer(playerId);
               _refreshQueueAfterDelay(provider, playerId);
               resumed = true;
