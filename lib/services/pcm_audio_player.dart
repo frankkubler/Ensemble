@@ -76,13 +76,20 @@ class PcmAudioPlayer {
   PcmErrorCallback? onError;
 
   // Maximum chunks to feed at once to keep native buffer small (~200ms)
-  // Each chunk is ~25ms of audio, so 8 chunks = ~200ms
-  // Reduced from 12 (300ms) to 8 for faster pause response
-  static const int _maxChunksPerFeed = 8;
+  // Each chunk is ~25ms of audio, so 12 chunks = ~300ms.
+  // This slightly increases pause latency but gives the native player more
+  // headroom against UI jank and network jitter, which reduces crackling.
+  static const int _maxChunksPerFeed = 12;
 
   // Feed threshold - lower = faster pause but more risk of underruns
-  // Reduced from 8000 to 5000 frames (~104ms vs ~166ms) for faster response
-  static const int _feedThreshold = 5000;
+  // Use a slightly larger threshold (~200ms) to reduce underruns when the UI
+  // isolate is busy or packets arrive with small bursts of jitter.
+  static const int _feedThreshold = 9600;
+
+  // Require a small preroll buffer before starting playback. Starting the
+  // native PCM player on the first chunk makes startup transitions more prone
+  // to audible crackle if the next chunk is delayed.
+  static const int _minChunksBeforeStart = 3;
 
   // Maximum buffer size to prevent memory overflow (~10 seconds of audio)
   // At 48kHz stereo 16-bit: 192KB/sec, so ~2MB for 10 seconds
@@ -261,8 +268,9 @@ class PcmAudioPlayer {
     // Add to buffer with overflow protection
     _addToBuffer(audioData);
 
-    // Start playback if not already started
-    if (!_isStarted && _state == PcmPlayerState.ready) {
+    // Start only after a small preroll so the native buffer is not nearly
+    // empty on the very first feed cycle.
+    if (!_isStarted && _state == PcmPlayerState.ready && _audioBuffer.length >= _minChunksBeforeStart) {
       _startPlayback();
     }
 
