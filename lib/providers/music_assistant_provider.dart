@@ -6456,7 +6456,11 @@ class MusicAssistantProvider with ChangeNotifier {
       }
     } else if (!resumed) {
       _logger.log('🎵 Radio queue not ready after 15s — resuming anyway');
-      await api.resumePlayer(playerId);
+      try {
+        await api.resumePlayer(playerId);
+      } catch (e) {
+        _logger.log('🎵 Radio: resumePlayer fallback failed (non-fatal): $e');
+      }
     }
   }
 
@@ -6525,7 +6529,11 @@ class MusicAssistantProvider with ChangeNotifier {
         }
       } else if (!resumed) {
         _logger.log('🎵 Artist radio queue not ready after 15s — resuming anyway');
-        await api.resumePlayer(playerId);
+        try {
+          await api.resumePlayer(playerId);
+        } catch (e) {
+          _logger.log('🎵 Artist radio: resumePlayer fallback failed (non-fatal): $e');
+        }
       }
     } finally {
       _isStartingPlayMedia = false;
