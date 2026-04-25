@@ -18,6 +18,7 @@ import 'services/sync_service.dart';
 import 'services/audio/massiv_audio_handler.dart';
 import 'services/auth/auth_manager.dart';
 import 'services/debug_logger.dart';
+import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'services/hardware_volume_service.dart';
 import 'services/music_assistant_api.dart' show MAConnectionState;
 import 'theme/theme_provider.dart';
@@ -137,6 +138,9 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
   StreamSubscription? _absoluteVolumeSub;
   String? _lastSelectedPlayerId;
   String? _builtinPlayerId;
+  // System volume saved when switching to a remote player, restored when
+  // switching back to builtin so the phone speaker level is unchanged.
+  double? _savedSystemVolume;
 
   // Volume step size (percentage points per button press)
   static const int _volumeStep = 5;
@@ -198,6 +202,11 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
     // When a remote/group player is active, observe system volume changes
     // so lockscreen hardware buttons route to the MA player.
     if (!isBuiltinPlayer && player != null) {
+      // Save the current system volume so we can restore it when switching back
+      // to the builtin player. Without this, startVolumeObserver(initialVolume:)
+      // sets STREAM_MUSIC to the remote player's level (often 100%), which
+      // blasts the phone speaker the next time it is used.
+      _savedSystemVolume = await FlutterVolumeController.getVolume();
       // Get the effective volume to sync the system volume HUD
       final effectiveVolume = _musicProvider.groupVolumeManager.isGroupPlayer(player)
           ? (_musicProvider.groupVolumeManager.getEffectiveVolumeLevel(
@@ -206,6 +215,14 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
       await _hardwareVolumeService.startVolumeObserver(initialVolume: effectiveVolume);
     } else {
       await _hardwareVolumeService.stopVolumeObserver();
+      // Restore the system volume to what it was before we switched to a
+      // remote player (avoids the phone speaker being left at the remote
+      // player's volume level).
+      final saved = _savedSystemVolume;
+      if (saved != null) {
+        _savedSystemVolume = null;
+        await FlutterVolumeController.setVolume(saved);
+      }
     }
   }
 
