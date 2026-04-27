@@ -2074,6 +2074,16 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onPlay = () async {
       _logger.log('🎵 Notification: Play pressed');
+      // Guard: Android Auto often emits a stale transport "play" while the
+      // disconnect debounce is still active. Treat it as transient noise to
+      // avoid unintentionally restarting the builtin player right after AA
+      // disconnect.
+      if (_aaSessionActive &&
+          !audioHandler.isAndroidAutoConnected &&
+          (_aaDisconnectDebounceTimer?.isActive ?? false)) {
+        _logger.log('🚗 Ignoring notification play during AA disconnect debounce');
+        return;
+      }
       // During an AA session the builtin player may not yet be the selected
       // player (race condition at AA connect). Target the builtin player
       // directly to avoid sending play to a BT/ESP32 player that does not
@@ -2088,7 +2098,8 @@ class MusicAssistantProvider with ChangeNotifier {
         if (builtinId != null) targetPlayerId = builtinId;
       }
       if (targetPlayerId != null) {
-        resumePlayer(targetPlayerId, fromUserGesture: true);
+        // Notification/AA transport play is not a player-selection override.
+        resumePlayer(targetPlayerId);
         // Skip the player-list refresh when AA is mid-reconnect (_pendingAASwitch):
         // _loadAndSelectPlayers will run anyway from onAAConnected, and an extra
         // concurrent refresh only causes state-race noise in the logs.
