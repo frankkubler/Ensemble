@@ -2041,36 +2041,69 @@ class MusicAssistantProvider with ChangeNotifier {
     await _localPlayer.initialize();
     _isLocalPlayerPowered = true;
 
+    Future<String?> resolveTransportTargetPlayerId() async {
+      // During an AA session, prefer the builtin player unless the user
+      // explicitly overrode the selection.
+      if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
+        final builtinId = await SettingsService.getBuiltinPlayerId();
+        if (builtinId != null) {
+          final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
+            (p) => p != null && _matchesBuiltinId(p.playerId, builtinId) && p.available,
+            orElse: () => null,
+          );
+          if (builtinPlayer != null) return builtinPlayer.playerId;
+
+          // Fallback: player may be mid-registration; keep the stored ID.
+          return builtinId;
+        }
+      }
+
+      if (_selectedPlayer?.playerId != null) {
+        return _selectedPlayer!.playerId;
+      }
+
+      final builtinId = await SettingsService.getBuiltinPlayerId();
+      if (builtinId != null) {
+        final builtinPlayer = _availablePlayers.cast<Player?>().firstWhere(
+          (p) => p != null && _matchesBuiltinId(p.playerId, builtinId),
+          orElse: () => null,
+        );
+        return builtinPlayer?.playerId ?? builtinId;
+      }
+
+      return null;
+    }
+
     // Wire up notification button callbacks
     audioHandler.onSkipToNext = () {
       _logger.log('🎵 Notification: Skip to next pressed');
       // Mirror the AA-aware builtin-player routing used for onPlay/onPause so
       // the next command always targets the correct player during a car session.
       unawaited(() async {
-        String? targetPlayerId = _selectedPlayer?.playerId;
-        if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
-          final builtinId = await SettingsService.getBuiltinPlayerId();
-          if (builtinId != null) targetPlayerId = builtinId;
-        }
+        final targetPlayerId = await resolveTransportTargetPlayerId();
         if (targetPlayerId == null) return;
+        _logger.log('🎵 Notification: Skip to next target=$targetPlayerId');
         await nextTrack(targetPlayerId);
         await Future.delayed(Timings.trackChangeDelay);
         await _updatePlayerState();
-      }().catchError((e) => _logger.log('⚠️ skipToNext error: $e')));
+      }().catchError((e) {
+        _logger.log('⚠️ skipToNext error: $e');
+        return null;
+      }));
     };
     audioHandler.onSkipToPrevious = () {
       _logger.log('🎵 Notification: Skip to previous pressed');
       unawaited(() async {
-        String? targetPlayerId = _selectedPlayer?.playerId;
-        if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
-          final builtinId = await SettingsService.getBuiltinPlayerId();
-          if (builtinId != null) targetPlayerId = builtinId;
-        }
+        final targetPlayerId = await resolveTransportTargetPlayerId();
         if (targetPlayerId == null) return;
+        _logger.log('🎵 Notification: Skip to previous target=$targetPlayerId');
         await previousTrack(targetPlayerId);
         await Future.delayed(Timings.trackChangeDelay);
         await _updatePlayerState();
-      }().catchError((e) => _logger.log('⚠️ skipToPrevious error: $e')));
+      }().catchError((e) {
+        _logger.log('⚠️ skipToPrevious error: $e');
+        return null;
+      }));
     };
     audioHandler.onPlay = () async {
       _logger.log('🎵 Notification: Play pressed');
@@ -2092,14 +2125,16 @@ class MusicAssistantProvider with ChangeNotifier {
       // already physically connected (onPlay fires before getChildren sets the flag).
       // Exception: if the user has explicitly selected another player (_aaUserOverride)
       // respect their choice — consistent with _loadAndSelectPlayers Exception 2.
-      String? targetPlayerId = _selectedPlayer?.playerId;
-      if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
-        final builtinId = await SettingsService.getBuiltinPlayerId();
-        if (builtinId != null) targetPlayerId = builtinId;
-      }
+      final targetPlayerId = await resolveTransportTargetPlayerId();
       if (targetPlayerId != null) {
         // Notification/AA transport play is not a player-selection override.
-        resumePlayer(targetPlayerId);
+        _logger.log('🎵 Notification: Play target=$targetPlayerId');
+        try {
+          await resumePlayer(targetPlayerId);
+        } catch (e) {
+          _logger.log('⚠️ Notification onPlay failed for $targetPlayerId: $e');
+          return;
+        }
         // Skip the player-list refresh when AA is mid-reconnect (_pendingAASwitch):
         // _loadAndSelectPlayers will run anyway from onAAConnected, and an extra
         // concurrent refresh only causes state-race noise in the logs.
@@ -2112,13 +2147,10 @@ class MusicAssistantProvider with ChangeNotifier {
     };
     audioHandler.onPause = () async {
       _logger.log('🎵 Notification: Pause pressed');
-      String? targetPlayerId = _selectedPlayer?.playerId;
-      if ((_aaSessionActive || audioHandler.isAndroidAutoConnected) && !_aaUserOverride) {
-        final builtinId = await SettingsService.getBuiltinPlayerId();
-        if (builtinId != null) targetPlayerId = builtinId;
-      }
+      final targetPlayerId = await resolveTransportTargetPlayerId();
       if (targetPlayerId != null) {
-        pausePlayer(targetPlayerId);
+        _logger.log('🎵 Notification: Pause target=$targetPlayerId');
+        await pausePlayer(targetPlayerId);
       }
     };
     audioHandler.onSwitchPlayer = () {
