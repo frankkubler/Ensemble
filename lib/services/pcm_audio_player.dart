@@ -203,21 +203,40 @@ class PcmAudioPlayer {
     if (_shouldBlockFeeding) return;
     if (_isFeeding) return;
 
-    // Silence padding: when buffer is empty during playback, inject zeroed chunks
-    // to prevent native player starvation (crackling/noise). This bridges up to
-    // 800ms of network stall transparently. Resets immediately when real audio arrives.
+    // Silence padding: when buffer is empty during playback, feed silence DIRECTLY
+    // to the native player — intentionally bypasses _audioBuffer so that real audio
+    // arriving later is NOT delayed by silence chunks in the queue.
+    // Bridges up to 800ms of network stall without mixing silence into the audio timeline.
     if (_audioBuffer.isEmpty && !_userPaused && _silencePaddingFed < _silencePaddingMaxChunks) {
-      // 25ms of silence at current format (bytes = sampleRate * channels * bytesPerSample * 0.025)
-      final chunkBytes = _format.sampleRate * _format.channels * (_format.bitDepth ~/ 8) * 25 ~/ 1000;
-      _audioBuffer.insert(0, Uint8List(chunkBytes)); // zeros = silence
       _silencePaddingFed++;
       if (_silencePaddingFed == 1) {
         _logger.log('PcmAudioPlayer: Network stall — injecting silence to prevent crackle');
       }
+      _feedSilenceChunk();
+      return;
     }
 
     if (_audioBuffer.isEmpty) return;
     _feedNextChunk();
+  }
+
+  /// Feed a single 25ms silence chunk directly to flutter_pcm_sound.
+  /// Does NOT touch _audioBuffer, so real audio is never delayed.
+  Future<void> _feedSilenceChunk() async {
+    if (_isFeeding) return;
+    _isFeeding = true;
+    _feedCompleter = Completer<void>();
+    try {
+      // 25ms of silence: sampleRate × channels × 0.025s samples (Int16)
+      final samplesPerChunk = _format.sampleRate * _format.channels * 25 ~/ 1000;
+      final silence = List<int>.filled(samplesPerChunk, 0);
+      await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(silence));
+    } catch (e) {
+      _logger.log('PcmAudioPlayer: Silence feed error: $e');
+    } finally {
+      _isFeeding = false;
+      _feedCompleter?.complete();
+    }
   }
 
   /// Connect to a Sendspin audio data stream and start playback
@@ -668,6 +687,8 @@ class PcmAudioPlayer {
     _bytesPlayed = 0;
     _bytesPlayedAtLastPause = 0;
     _playbackStartTime = null;
+    _userPaused = false;        // Reset so silence padding works on next track
+    _silencePaddingFed = 0;     // Reset padding counter for next stream
     _logger.log('PcmAudioPlayer: Stopped playback');
 
     // Re-initialize for next playback

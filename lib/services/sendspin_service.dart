@@ -7,6 +7,7 @@ import 'package:web_socket_channel/io.dart';
 import 'debug_logger.dart';
 import 'settings_service.dart';
 import 'device_id_service.dart';
+import '../constants/timings.dart';
 
 /// Connection state for Sendspin player
 enum SendspinConnectionState {
@@ -259,7 +260,7 @@ class SendspinService {
                 'bit_depth': 16,
               },
             ],
-            'buffer_capacity': 10485760,  // 10MB buffer — allows server to pre-fill ~5s of audio
+            'buffer_capacity': 1048576,  // 1MB — must match client's actual PCM buffer capacity
             'supported_commands': ['volume', 'mute'],
           },
         },
@@ -620,7 +621,7 @@ class SendspinService {
   /// NAT/routers time out idle connections after ~15s.
   void _startHeartbeat() {
     _stopHeartbeat();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _heartbeatTimer = Timer.periodic(Timings.heartbeatInterval, (_) {
       _sendClientTime();
     });
   }
