@@ -91,10 +91,16 @@ class PcmAudioPlayer {
   // to audible crackle if the next chunk is delayed.
   static const int _minChunksBeforeStart = 3;
 
-  // Maximum buffer size to prevent memory overflow (~10 seconds of audio)
-  // At 48kHz stereo 16-bit: 192KB/sec, so ~2MB for 10 seconds
-  // Each chunk is ~4KB, so max ~500 chunks
-  static const int _maxBufferChunks = 500;
+  // Maximum buffer size to prevent memory overflow (~20 seconds of audio)
+  // At 48kHz stereo 16-bit: 192KB/sec, so ~3.8MB for 20 seconds
+  // Each chunk is ~4KB, so max ~1000 chunks (was 500 = ~10s)
+  static const int _maxBufferChunks = 1000;
+
+  // Silence padding: max silence chunks to inject on network stall.
+  // Bridges up to 800ms of stall before native player underruns and crackles.
+  // Each chunk = 25ms @ 48kHz stereo 16-bit (see _onFeedRequested).
+  static const int _silencePaddingMaxChunks = 32; // 32 × 25ms = 800ms
+  int _silencePaddingFed = 0;
 
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
@@ -195,8 +201,22 @@ class PcmAudioPlayer {
     // Block feeding during pause, transitional states, or when not playing
     if (_state != PcmPlayerState.playing) return;
     if (_shouldBlockFeeding) return;
-    if (_audioBuffer.isEmpty || _isFeeding) return;
+    if (_isFeeding) return;
 
+    // Silence padding: when buffer is empty during playback, inject zeroed chunks
+    // to prevent native player starvation (crackling/noise). This bridges up to
+    // 800ms of network stall transparently. Resets immediately when real audio arrives.
+    if (_audioBuffer.isEmpty && !_userPaused && _silencePaddingFed < _silencePaddingMaxChunks) {
+      // 25ms of silence at current format (bytes = sampleRate * channels * bytesPerSample * 0.025)
+      final chunkBytes = _format.sampleRate * _format.channels * (_format.bitDepth ~/ 8) * 25 ~/ 1000;
+      _audioBuffer.insert(0, Uint8List(chunkBytes)); // zeros = silence
+      _silencePaddingFed++;
+      if (_silencePaddingFed == 1) {
+        _logger.log('PcmAudioPlayer: Network stall — injecting silence to prevent crackle');
+      }
+    }
+
+    if (_audioBuffer.isEmpty) return;
     _feedNextChunk();
   }
 
@@ -236,6 +256,9 @@ class PcmAudioPlayer {
   void _onAudioData(Uint8List audioData) {
     // Ignore data if in error state
     if (_state == PcmPlayerState.error) return;
+
+    // Real audio arriving — cancel any active silence padding immediately
+    _silencePaddingFed = 0;
 
     // Handle audio arriving during paused/transitional states
     // This can happen when audio frames arrive before stream/start message (race condition)

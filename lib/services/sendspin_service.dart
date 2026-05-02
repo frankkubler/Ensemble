@@ -40,6 +40,7 @@ class SendspinService {
   WebSocketChannel? _channel;
   Timer? _heartbeatTimer;
   Timer? _reconnectTimer;
+  int _reconnectAttempts = 0; // Exponential backoff counter
 
   // Connection state
   SendspinConnectionState _state = SendspinConnectionState.disconnected;
@@ -258,7 +259,7 @@ class SendspinService {
                 'bit_depth': 16,
               },
             ],
-            'buffer_capacity': 1048576,  // 1MB buffer
+            'buffer_capacity': 10485760,  // 10MB buffer — allows server to pre-fill ~5s of audio
             'supported_commands': ['volume', 'mute'],
           },
         },
@@ -279,6 +280,7 @@ class SendspinService {
 
       _logger.log('Sendspin: Connected and registered successfully');
       _updateState(SendspinConnectionState.connected);
+      _reconnectAttempts = 0; // Reset backoff on successful connection
       _startHeartbeat();
 
       return true;
@@ -614,9 +616,11 @@ class SendspinService {
   }
 
   /// Start heartbeat timer using Sendspin's client/time for clock synchronization
+  /// Aggressive 5s interval keeps the connection alive on mobile networks where
+  /// NAT/routers time out idle connections after ~15s.
   void _startHeartbeat() {
     _stopHeartbeat();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _sendClientTime();
     });
   }
@@ -654,12 +658,18 @@ class SendspinService {
     _heartbeatTimer = null;
   }
 
-  /// Schedule reconnection attempt
+  /// Schedule reconnection attempt with exponential backoff
+  /// Delays: 500ms → 1s → 2s → 4s → 8s → 16s → 30s (capped)
   void _scheduleReconnect() {
     if (_isDisposed) return;
 
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 5), () {
+    final delayMs = (_reconnectAttempts < 7)
+        ? (500 * (1 << _reconnectAttempts)).clamp(500, 30000)
+        : 30000;
+    _reconnectAttempts++;
+    _logger.log('Sendspin: Reconnect attempt $_reconnectAttempts in ${delayMs}ms...');
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       if (!_isDisposed && _state != SendspinConnectionState.connected) {
         _logger.log('Sendspin: Attempting reconnection...');
         if (_connectedUrl != null) {

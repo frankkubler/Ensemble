@@ -3,7 +3,8 @@ class Timings {
   Timings._();
 
   /// WebSocket heartbeat/ping interval to keep connection alive
-  static const Duration heartbeatInterval = Duration(seconds: 30);
+  /// 5s (aggressive) keeps NAT/router alive on mobile networks (was 30s)
+  static const Duration heartbeatInterval = Duration(seconds: 5);
 
   /// Player state polling interval (for selected player updates)
   static const Duration playerPollingInterval = Duration(seconds: 5);
