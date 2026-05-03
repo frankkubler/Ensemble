@@ -236,11 +236,35 @@ class PositionTracker {
     if (_interpolationTimer != null) return;
 
     _interpolationTimer = Timer.periodic(const Duration(milliseconds: 250), (timer) {
+      // Prevent position from freezing when server updates are infrequent
+      // (e.g. app backgrounded during Android Auto session — no player_updated
+      // events arrive for >30 s, causing _maxAnchorAge to cap the position).
+      _preventAnchorFreeze();
       _emitPosition();
     });
 
     // Emit immediately
     _emitPosition();
+  }
+
+  /// Refresh the anchor using real elapsed time before [_maxAnchorAge] kicks in.
+  ///
+  /// Music Assistant only sends `player_updated` on state changes; during steady
+  /// background PCM playback no events arrive, leaving the anchor stale. Without
+  /// this self-healing the position would freeze on Android Auto after ~30 s.
+  void _preventAnchorFreeze() {
+    if (!_isPlaying) return;
+    final anchorAge = DateTime.now().difference(_anchorTime);
+    if (anchorAge.inSeconds < 25) return; // still within safe window
+
+    // Use the true (uncapped) elapsed time to advance the anchor.
+    final realElapsed = anchorAge.inMilliseconds / 1000.0;
+    var newPos = _anchorPosition + realElapsed;
+    if (_duration.inSeconds > 0) {
+      newPos = newPos.clamp(0.0, _duration.inSeconds.toDouble());
+    }
+    _anchorPosition = newPos;
+    _anchorTime = DateTime.now();
   }
 
   void _stopInterpolationTimer() {
