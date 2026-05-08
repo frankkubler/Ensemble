@@ -260,7 +260,7 @@ class SendspinService {
                 'bit_depth': 16,
               },
             ],
-            'buffer_capacity': 4800000,  // ~4.8MB — matches _maxBufferChunks (1000 × 4800 bytes ≈ 25s @ 48kHz stereo 16-bit)
+            'buffer_capacity': 10000000,  // 10 seconds in microseconds (official app unit: µs, default=500_000µs=500ms)
             'supported_commands': ['volume', 'mute'],
           },
         },
