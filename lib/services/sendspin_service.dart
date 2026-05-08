@@ -260,7 +260,7 @@ class SendspinService {
                 'bit_depth': 16,
               },
             ],
-            'buffer_capacity': 10000000,  // 10 seconds in microseconds (official app unit: µs, default=500_000µs=500ms)
+            'buffer_capacity': 2000000,  // 2 seconds in microseconds (official app unit: µs; official app default=500_000µs)
             'supported_commands': ['volume', 'mute'],
           },
         },

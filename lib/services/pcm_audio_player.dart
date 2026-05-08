@@ -81,15 +81,17 @@ class PcmAudioPlayer {
   // headroom against UI jank and network jitter, which reduces crackling.
   static const int _maxChunksPerFeed = 12;
 
-  // Feed threshold - lower = faster pause but more risk of underruns
-  // Use a slightly larger threshold (~200ms) to reduce underruns when the UI
-  // isolate is busy or packets arrive with small bursts of jitter.
-  static const int _feedThreshold = 9600;
+  // Feed threshold — native requests more data when remaining frames drop below this.
+  // Higher = larger native buffer headroom = more resilient to Dart isolate throttling
+  // in background. release() is used on pause so native buffer size doesn't affect
+  // pause latency.
+  // 24000 frames @ 48kHz = 500ms headroom.
+  static const int _feedThreshold = 24000;
 
-  // Require a small preroll buffer before starting playback. Starting the
-  // native PCM player on the first chunk makes startup transitions more prone
-  // to audible crackle if the next chunk is delayed.
-  static const int _minChunksBeforeStart = 3;
+  // Require a preroll buffer before starting playback to ensure the native player
+  // has enough data on the first feed cycle.
+  // 6 chunks × 25ms = 150ms of audio before start().
+  static const int _minChunksBeforeStart = 6;
 
   // Maximum buffer size to prevent memory overflow (~20 seconds of audio)
   // At 48kHz stereo 16-bit: 192KB/sec, so ~3.8MB for 20 seconds
@@ -364,15 +366,27 @@ class PcmAudioPlayer {
   Future<void> _startPlayback() async {
     if (_isStarted) return;
 
+    // CRITICAL: set _isStarted = true BEFORE await start().
+    // _onAudioData calls _startPlayback() without await, so control returns
+    // to the caller before start() resolves. When the native player fires
+    // _onFeedRequested immediately after start(), _isStarted must already be
+    // true or the guard in _onFeedRequested blocks the first feed → underrun
+    // → audible crackle. Reset to false only on error.
+    _isStarted = true;
+
     try {
       await pcm.FlutterPcmSound.start();
-      _isStarted = true;
       _state = PcmPlayerState.playing;
       _playbackStartTime = DateTime.now();
       _startElapsedTimeTimer();
       _logger.log('PcmAudioPlayer: Started playback');
+      // Pre-fill the native buffer with already-buffered chunks.
+      if (!_isFeeding && _audioBuffer.isNotEmpty) {
+        unawaited(_feedNextChunk());
+      }
     } catch (e) {
       _logger.log('PcmAudioPlayer: Error starting playback: $e');
+      _isStarted = false;
       _state = PcmPlayerState.error;
     }
   }
