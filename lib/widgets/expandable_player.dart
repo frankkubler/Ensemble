@@ -234,6 +234,9 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   bool _isVerticalDragging = false;
   double _dragStartY = 0;
   double _dragStartValue = 0;
+  // Whether the drag has moved enough to be intentional (vs. a tap that the
+  // drag recognizer accidentally claimed from the gesture arena).
+  bool _isDragSignificant = false;
 
   // Maximum drag distance for full expand/collapse
   static const double _maxDragDistance = 300.0;
@@ -241,6 +244,9 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   // Thresholds for committing expand/collapse
   static const double _commitPositionThreshold = 0.3; // 30% progress
   static const double _commitVelocityThreshold = 800.0; // px/s
+  // Minimum drag displacement (px) to consider a gesture as an intentional drag
+  // rather than a button tap whose drag recognizer accidentally won the gesture arena.
+  static const double _significantDragThreshold = 30.0;
 
   @override
   void initState() {
@@ -547,6 +553,7 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   /// Handle vertical drag start - begin gesture-driven expansion
   void _handleVerticalDragStart(DragStartDetails details) {
     _isVerticalDragging = true;
+    _isDragSignificant = false;
     _dragStartY = details.globalPosition.dy;
     _dragStartValue = _controller.value;
     _controller.stop(); // Stop any running animation
@@ -557,6 +564,15 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
     if (!_isVerticalDragging) return;
 
     final dragDelta = _dragStartY - details.globalPosition.dy;
+
+    // Only start moving the controller once the drag is clearly intentional.
+    // This prevents button taps whose drag recognizer accidentally won the
+    // gesture arena (18px Flutter slop) from silently collapsing the player.
+    if (!_isDragSignificant) {
+      if (dragDelta.abs() < _significantDragThreshold) return;
+      _isDragSignificant = true;
+    }
+
     // Swipe up = positive delta = expand (increase value)
     // Swipe down = negative delta = collapse (decrease value)
     final normalizedDelta = dragDelta / _maxDragDistance;
@@ -569,6 +585,20 @@ class ExpandablePlayerState extends State<ExpandablePlayer>
   void _handleVerticalDragEnd(DragEndDetails details) {
     if (!_isVerticalDragging) return;
     _isVerticalDragging = false;
+
+    // If the drag never reached the significance threshold (i.e. the drag
+    // recognizer won the gesture arena for what was actually a button tap),
+    // simply snap back to the nearest endpoint without triggering collapse.
+    if (!_isDragSignificant) {
+      if (_dragStartValue >= 0.5) {
+        _controller.duration = _expandDuration;
+        _controller.forward();
+      } else {
+        _controller.duration = _collapseDuration;
+        _controller.reverse();
+      }
+      return;
+    }
 
     final velocity = details.primaryVelocity ?? 0;
     final currentValue = _controller.value;

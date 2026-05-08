@@ -42,14 +42,13 @@ class _AnimatedIconButtonState extends State<AnimatedIconButton>
     super.dispose();
   }
 
-  Future<void> _handleTap() async {
+  void _handleTap() {
     if (widget.onPressed == null) return;
 
-    // Animate press
-    await _controller.forward();
-    await _controller.reverse();
-
-    // Call the callback
+    // Call the callback immediately — the visual animation (scale down/up)
+    // is already driven by onTapDown/onTapUp on the GestureDetector.
+    // Awaiting the animation here caused a ~200ms delay and conflicted
+    // with the onTapUp reverse animation running simultaneously.
     widget.onPressed!();
   }
 

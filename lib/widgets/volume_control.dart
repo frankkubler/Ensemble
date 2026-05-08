@@ -53,6 +53,11 @@ class _VolumeControlState extends State<VolumeControl> {
   @override
   void initState() {
     super.initState();
+    // Suppress the native Android volume overlay for the lifetime of this widget.
+    // Doing it here (not lazily on drag start) prevents the race condition where
+    // setVolume() fires on the first drag update before updateShowSystemUI(false)
+    // has completed asynchronously.
+    FlutterVolumeController.updateShowSystemUI(false);
     _initLocalPlayer();
     _loadSettings();
   }
@@ -108,6 +113,9 @@ class _VolumeControlState extends State<VolumeControl> {
 
   @override
   void dispose() {
+    // Restore native volume overlay for physical button presses once
+    // the in-app slider is gone.
+    FlutterVolumeController.updateShowSystemUI(true);
     _volumeListener?.cancel();
     _precisionTimer?.cancel();
     _buttonIndicatorTimer?.cancel();
@@ -244,11 +252,6 @@ class _VolumeControlState extends State<VolumeControl> {
                     GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onHorizontalDragStart: (details) {
-                        // Suppress Android native volume UI during in-app slider drag.
-                        // Physical buttons will still show the native UI.
-                        if (_isLocalPlayer) {
-                          unawaited(FlutterVolumeController.updateShowSystemUI(false));
-                        }
                         setState(() {
                           _isDragging = true;
                           _pendingVolume = currentVolume;
@@ -323,10 +326,7 @@ class _VolumeControlState extends State<VolumeControl> {
                           _isDragging = false;
                           _pendingVolume = null;
                         });
-                        // Restore native volume UI for physical button presses
-                        if (_isLocalPlayer) {
-                          unawaited(FlutterVolumeController.updateShowSystemUI(true));
-                        }
+
                       },
                       // Custom slider track (no Overlay needed - Flutter 3.38 Slider uses OverlayPortal)
                       child: SizedBox(
