@@ -77,9 +77,12 @@ class PcmAudioPlayer {
 
   // Maximum chunks to feed at once to keep native buffer small (~200ms)
   // Each chunk is ~25ms of audio, so 12 chunks = ~300ms.
-  // This slightly increases pause latency but gives the native player more
-  // headroom against UI jank and network jitter, which reduces crackling.
-  static const int _maxChunksPerFeed = 12;
+  // Feed as many chunks as possible per cycle so the native buffer stays full.
+  // Large native buffer = resilient in background (Dart is throttled by Android,
+  // native PCM thread is not). pause() uses release() which clears the native
+  // buffer instantly, so buffer size has NO effect on pause latency.
+  // 120 chunks × 25ms = 3 seconds of audio per feed burst.
+  static const int _maxChunksPerFeed = 120;
 
   // Feed threshold — native requests more data when remaining frames drop below this.
   // Higher = larger native buffer headroom = more resilient to Dart isolate throttling
@@ -431,8 +434,8 @@ class PcmAudioPlayer {
     try {
       int chunksProcessed = 0;
 
-      // CRITICAL: Only feed limited chunks to keep native buffer small
-      // This is the key to fast pause - we drain ~200ms instead of 5-8 seconds
+      // Feed up to _maxChunksPerFeed chunks to keep native buffer well-filled.
+      // Large native buffer prevents underruns when Dart is throttled in background.
       while (_audioBuffer.isNotEmpty &&
              chunksProcessed < _maxChunksPerFeed &&
              _state == PcmPlayerState.playing &&
@@ -639,27 +642,25 @@ class PcmAudioPlayer {
     _bytesPlayedAtLastPause = _bytesPlayed;
     _stopElapsedTimeTimer();
 
-    // Schedule release() to clear native buffer - use Future.delayed to yield control
-    // This allows UI to update before the potentially blocking release() call.
-    // Guard: if play() was called for the next stream before this lambda runs
-    // (rapid track transition / next button), skip the release to avoid cutting
-    // the new stream's audio.
-    unawaited(Future.delayed(Duration.zero, () async {
-      if (_state != PcmPlayerState.paused) return;
-      try {
-        await pcm.FlutterPcmSound.release().timeout(
-          const Duration(milliseconds: 500),
-          onTimeout: () {
-            _logger.log('PcmAudioPlayer: Release timed out');
-            _emitError(PcmPlayerError.releaseTimeout, 'release() timed out');
-          },
-        );
-        _isStarted = false;
-        _logger.log('PcmAudioPlayer: Player released for instant stop');
-      } catch (e) {
-        _logger.log('PcmAudioPlayer: Release error (expected if already released): $e');
-      }
-    }));
+    // Release immediately (awaited) to clear the native PCM buffer.
+    // Critical: must happen BEFORE we set state = paused so that if play() is
+    // called immediately after (rapid next/prev), the old audio is already gone
+    // from the native player. The old approach (Future.delayed + state guard)
+    // was skipping release() on rapid transitions, causing old audio to bleed
+    // into the new track and the user having to wait for the buffer to drain.
+    try {
+      await pcm.FlutterPcmSound.release().timeout(
+        const Duration(milliseconds: 500),
+        onTimeout: () {
+          _logger.log('PcmAudioPlayer: Release timed out');
+          _emitError(PcmPlayerError.releaseTimeout, 'release() timed out');
+        },
+      );
+      _isStarted = false;
+      _logger.log('PcmAudioPlayer: Player released for instant stop');
+    } catch (e) {
+      _logger.log('PcmAudioPlayer: Release error (expected if already released): $e');
+    }
 
     // Transition to paused state
     _state = PcmPlayerState.paused;
