@@ -202,6 +202,8 @@ class PcmAudioPlayer {
     if (_state != PcmPlayerState.playing) return;
     if (_shouldBlockFeeding) return;
     if (_isFeeding) return;
+    // Native player not yet started (preroll in progress) — don't inject silence
+    if (!_isStarted) return;
 
     // Silence padding: when buffer is empty during playback, feed silence DIRECTLY
     // to the native player — intentionally bypasses _audioBuffer so that real audio
@@ -311,8 +313,12 @@ class PcmAudioPlayer {
     _addToBuffer(audioData);
 
     // Start only after a small preroll so the native buffer is not nearly
-    // empty on the very first feed cycle.
-    if (!_isStarted && _state == PcmPlayerState.ready && _audioBuffer.length >= _minChunksBeforeStart) {
+    // empty on the very first feed cycle.  Applies to both initial start
+    // (state == ready) and resume-after-pause (state == playing, _isStarted
+    // kept false so the preroll can build up before the native player begins).
+    if (!_isStarted &&
+        (_state == PcmPlayerState.ready || _state == PcmPlayerState.playing) &&
+        _audioBuffer.length >= _minChunksBeforeStart) {
       _startPlayback();
     }
 
@@ -549,7 +555,12 @@ class PcmAudioPlayer {
       _logger.log('PcmAudioPlayer: Resuming from pause at ${elapsedTime.inSeconds}s');
       _state = PcmPlayerState.resuming;
 
-      // Re-initialize the PCM player (it was released on pause)
+      // Re-initialize the native PCM player (it was released on pause).
+      // Important: do NOT call start() here — keep _isStarted = false so that
+      // _onAudioData will wait for a preroll buffer before starting the native
+      // player.  Starting with an empty buffer causes _onFeedRequested to fire
+      // immediately, injecting silence that interleaves with the first real
+      // audio chunks and produces an audible crackle on resume.
       try {
         await pcm.FlutterPcmSound.setup(
           sampleRate: _format.sampleRate,
@@ -557,8 +568,8 @@ class PcmAudioPlayer {
         );
         await pcm.FlutterPcmSound.setFeedThreshold(_feedThreshold);
         pcm.FlutterPcmSound.setFeedCallback(_onFeedRequested);
-        await pcm.FlutterPcmSound.start();
-        _isStarted = true;
+        // _isStarted stays false — _onAudioData will call _startPlayback()
+        // once _minChunksBeforeStart chunks have buffered.
       } catch (e) {
         _logger.log('PcmAudioPlayer: Error re-initializing on resume: $e');
         _emitError(PcmPlayerError.resumeFailed, e.toString());
@@ -568,11 +579,6 @@ class PcmAudioPlayer {
 
       _state = PcmPlayerState.playing;
       _startElapsedTimeTimer();
-
-      // Resume feeding - new audio will come from stream
-      if (!_isFeeding && _audioBuffer.isNotEmpty) {
-        _feedNextChunk();
-      }
 
       _logger.log('PcmAudioPlayer: Resumed playback');
       return true;
