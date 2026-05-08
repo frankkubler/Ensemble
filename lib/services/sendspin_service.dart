@@ -260,7 +260,7 @@ class SendspinService {
                 'bit_depth': 16,
               },
             ],
-            'buffer_capacity': 1048576,  // 1MB — must match client's actual PCM buffer capacity
+            'buffer_capacity': 4800000,  // ~4.8MB — matches _maxBufferChunks (1000 × 4800 bytes ≈ 25s @ 48kHz stereo 16-bit)
             'supported_commands': ['volume', 'mute'],
           },
         },
