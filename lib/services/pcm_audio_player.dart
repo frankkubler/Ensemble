@@ -85,11 +85,12 @@ class PcmAudioPlayer {
   static const int _maxChunksPerFeed = 120;
 
   // Feed threshold — native requests more data when remaining frames drop below this.
-  // Higher = larger native buffer headroom = more resilient to Dart isolate throttling
-  // in background. release() is used on pause so native buffer size doesn't affect
-  // pause latency.
-  // 24000 frames @ 48kHz = 500ms headroom.
-  static const int _feedThreshold = 24000;
+  // The native callback wakes up the Dart isolate even when it is throttled in
+  // background, so a HIGH threshold gives more time for Dart to respond before
+  // the buffer empties. pause() uses release() so the native buffer size has NO
+  // effect on pause latency — we can safely make this as large as we like.
+  // 192000 frames @ 48kHz stereo = 4 seconds of headroom.
+  static const int _feedThreshold = 192000;
 
   // Require a preroll buffer before starting playback to ensure the native player
   // has enough data on the first feed cycle.
@@ -422,9 +423,12 @@ class PcmAudioPlayer {
     onElapsedTimeUpdate?.call(elapsed);
   }
 
-  /// Feed the next chunk of audio data to the player
-  /// CRITICAL: Only feeds limited chunks to keep native buffer small (~200ms)
-  /// This enables faster pause response by minimizing buffered audio
+  /// Feed available audio data to the native player — batched for efficiency.
+  /// All available chunks (up to _maxChunksPerFeed) are concatenated into one
+  /// Int16List and pushed with a SINGLE feed() call. Benefits:
+  ///   • Minimises platform-channel round-trips (1 call vs N).
+  ///   • Pushes as much data as possible into the native buffer at once,
+  ///     so the buffer is full even when Dart is throttled in background.
   Future<void> _feedNextChunk() async {
     if (_isFeeding || _audioBuffer.isEmpty || _shouldBlockFeeding) return;
 
@@ -432,81 +436,75 @@ class PcmAudioPlayer {
     _feedCompleter = Completer<void>();
 
     try {
-      int chunksProcessed = 0;
-
-      // Feed up to _maxChunksPerFeed chunks to keep native buffer well-filled.
-      // Large native buffer prevents underruns when Dart is throttled in background.
       while (_audioBuffer.isNotEmpty &&
-             chunksProcessed < _maxChunksPerFeed &&
              _state == PcmPlayerState.playing &&
              !_shouldBlockFeeding) {
-        final chunk = _audioBuffer.removeAt(0);
+        // Collect up to _maxChunksPerFeed chunks into one contiguous sample list.
+        final allSamples = <int>[];
+        int bytesConsumed = 0;
+        int chunksConsumed = 0;
 
-        // Convert Uint8List (raw bytes) to Int16 samples
-        // Sendspin sends 16-bit little-endian PCM
-        final rawSamples = _bytesToInt16List(chunk);
-        final samples = _volumeGain == 1.0
-            ? rawSamples
-            : rawSamples.map((s) => (s * _volumeGain).round().clamp(-32768, 32767)).toList();
+        while (_audioBuffer.isNotEmpty &&
+               chunksConsumed < _maxChunksPerFeed &&
+               !_shouldBlockFeeding) {
+          final chunk = _audioBuffer.removeAt(0);
+          final rawSamples = _bytesToInt16List(chunk);
+          if (_volumeGain == 1.0) {
+            allSamples.addAll(rawSamples);
+          } else {
+            allSamples.addAll(
+                rawSamples.map((s) => (s * _volumeGain).round().clamp(-32768, 32767)));
+          }
+          bytesConsumed += chunk.length;
+          chunksConsumed++;
+        }
 
-        // Check state again before the async feed call
-        if (samples.isNotEmpty && !_shouldBlockFeeding) {
-          try {
-            await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(samples));
-          } catch (feedError) {
-            // Auto-recover from "must call setup first" error
-            // This happens when audio frames arrive before stream/start message
-            if (feedError.toString().contains('must call setup first') && !_isAutoRecovering) {
-              _logger.log('PcmAudioPlayer: Auto-recovering from setup error');
-              _isAutoRecovering = true;
+        if (allSamples.isEmpty || _shouldBlockFeeding) break;
 
-              try {
-                // Re-initialize the native player
-                await pcm.FlutterPcmSound.setup(
-                  sampleRate: _format.sampleRate,
-                  channelCount: _format.channels,
-                );
-                await pcm.FlutterPcmSound.setFeedThreshold(_feedThreshold);
-                pcm.FlutterPcmSound.setFeedCallback(_onFeedRequested);
-                await pcm.FlutterPcmSound.start();
-                _isStarted = true;
-                _state = PcmPlayerState.playing;
-                _startElapsedTimeTimer();
-                _logger.log('PcmAudioPlayer: Auto-recovery successful');
-
-                // Retry the feed with the current chunk
-                await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(samples));
-              } catch (recoveryError) {
-                _logger.log('PcmAudioPlayer: Auto-recovery failed: $recoveryError');
-                _isAutoRecovering = false;
-                rethrow;
-              }
+        try {
+          await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(allSamples));
+        } catch (feedError) {
+          // Auto-recover from "must call setup first" error
+          // This happens when audio frames arrive before stream/start message
+          if (feedError.toString().contains('must call setup first') && !_isAutoRecovering) {
+            _logger.log('PcmAudioPlayer: Auto-recovering from setup error');
+            _isAutoRecovering = true;
+            try {
+              await pcm.FlutterPcmSound.setup(
+                sampleRate: _format.sampleRate,
+                channelCount: _format.channels,
+              );
+              await pcm.FlutterPcmSound.setFeedThreshold(_feedThreshold);
+              pcm.FlutterPcmSound.setFeedCallback(_onFeedRequested);
+              await pcm.FlutterPcmSound.start();
+              _isStarted = true;
+              _state = PcmPlayerState.playing;
+              _startElapsedTimeTimer();
+              _logger.log('PcmAudioPlayer: Auto-recovery successful');
+              await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(allSamples));
+            } catch (recoveryError) {
+              _logger.log('PcmAudioPlayer: Auto-recovery failed: $recoveryError');
               _isAutoRecovering = false;
-            } else {
               rethrow;
             }
-          }
-
-          // Don't update stats if we got paused during the feed
-          if (!_shouldBlockFeeding) {
-            _framesPlayed++;
-            _bytesPlayed += chunk.length;
-            chunksProcessed++;
-
-            // Log periodically
-            if (_framesPlayed % 100 == 0) {
-              _logger.log('PcmAudioPlayer: Played $_framesPlayed frames (${(_bytesPlayed / 1024).toStringAsFixed(1)} KB)');
-            }
+            _isAutoRecovering = false;
+          } else {
+            rethrow;
           }
         }
 
-        // Yield to event loop mid-feed to allow UI to respond
-        if (chunksProcessed % 4 == 0) {
-          await Future.delayed(Duration.zero);
+        if (!_shouldBlockFeeding) {
+          _framesPlayed += chunksConsumed;
+          _bytesPlayed += bytesConsumed;
+          if (_framesPlayed % 100 < chunksConsumed) {
+            _logger.log('PcmAudioPlayer: Played $_framesPlayed frames (${(_bytesPlayed / 1024).toStringAsFixed(1)} KB)');
+          }
         }
+
+        // Yield to event loop after each batch to keep UI responsive.
+        await Future.delayed(Duration.zero);
       }
     } catch (e) {
-      // Don't log errors during pause/transition - expected when player is released
       if (!_shouldBlockFeeding) {
         _logger.log('PcmAudioPlayer: Error feeding audio: $e');
         _emitError(PcmPlayerError.feedFailed, e.toString());
@@ -537,6 +535,24 @@ class PcmAudioPlayer {
     }
 
     return samples;
+  }
+
+  /// Synchronously cut audio output as fast as possible.
+  /// Clears the Dart buffer and removes the feed callback so no new data reaches
+  /// the native player. Does NOT await release() — safe to call from a sync
+  /// context (e.g. audio focus interruption handler). The subsequent async
+  /// pause() will call release() to drain the native AudioTrack.
+  ///
+  /// Purpose: eliminate the ~10–50ms of stale PCM that plays during the OS
+  /// audio-focus transition when another app starts, which sounds like crackling.
+  void silenceNow() {
+    if (_state != PcmPlayerState.playing) return;
+    // Remove the native callback first so no new data is pushed.
+    pcm.FlutterPcmSound.setFeedCallback(null);
+    // Drain our Dart buffer so pause() has nothing to re-feed.
+    _audioBuffer.clear();
+    _silencePaddingFed = _silencePaddingMaxChunks; // Suppress silence injection
+    _logger.log('PcmAudioPlayer: silenceNow — feed callback removed, buffer cleared');
   }
 
   /// Handle stream errors - notify listeners and pause playback

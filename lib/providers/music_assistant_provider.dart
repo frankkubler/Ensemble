@@ -2944,12 +2944,26 @@ class MusicAssistantProvider with ChangeNotifier {
     final playerId = await SettingsService.getBuiltinPlayerId();
     if (playerId == null) return;
 
-    final isPlaying = _localPlayer.isPlaying;
-    final position = _localPlayer.position.inSeconds;
+    // In Sendspin mode just_audio is not used for playback — its position is
+    // always 0 and isPlaying is always false.  Report the PCM player state and
+    // the server-synced position instead, otherwise MA receives position=0
+    // on every tick which confuses the PositionTracker and causes the UI
+    // progress bar to jump after pressing next/prev.
+    final bool isPlaying;
+    final int position;
+    final bool isPaused;
+    if (_sendspinConnected && _sendspinService != null) {
+      isPlaying = _pcmAudioPlayer?.isPlaying ?? false;
+      isPaused  = _pcmAudioPlayer?.isPaused  ?? false;
+      position  = _positionTracker.currentPosition.inSeconds;
+    } else {
+      isPlaying = _localPlayer.isPlaying;
+      position  = _localPlayer.position.inSeconds;
+      isPaused  = !isPlaying && position > 0;
+    }
     // Use tracked MA volume instead of just_audio player volume
     // just_audio volume is for local playback, MA volume is for server sync
     final volume = _localPlayerVolume;
-    final isPaused = !isPlaying && position > 0;
 
     // Report via Sendspin if connected (MA 2.7.0b20+)
     if (_sendspinConnected && _sendspinService != null) {
@@ -6594,6 +6608,14 @@ class MusicAssistantProvider with ChangeNotifier {
 
       if (builtinPlayerId != null && playerId == builtinPlayerId && _sendspinConnected) {
         _logger.log('⏸️ Non-blocking local pause for builtin player');
+
+        // Synchronously cut PCM output before awaiting anything.
+        // This stops new data reaching the native AudioTrack immediately,
+        // eliminating the audible crackle/pop that occurs when the OS audio
+        // router switches sources (e.g. another app taking audio focus) while
+        // our AudioTrack is still active. The full async pause() below will
+        // then call release() to flush the native buffer.
+        _pcmAudioPlayer?.silenceNow();
 
         // CRITICAL: Don't await these - they can block the UI thread
         // Use unawaited to make them fire-and-forget, but log errors
