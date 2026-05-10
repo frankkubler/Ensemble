@@ -537,22 +537,43 @@ class PcmAudioPlayer {
     return samples;
   }
 
-  /// Synchronously cut audio output as fast as possible.
-  /// Clears the Dart buffer and removes the feed callback so no new data reaches
-  /// the native player. Does NOT await release() — safe to call from a sync
-  /// context (e.g. audio focus interruption handler). The subsequent async
-  /// pause() will call release() to drain the native AudioTrack.
+  /// Cut audio output as fast as possible — safe to call from any sync context.
   ///
-  /// Purpose: eliminate the ~10–50ms of stale PCM that plays during the OS
-  /// audio-focus transition when another app starts, which sounds like crackling.
+  /// Fires [FlutterPcmSound.release()] unawaited so the native AudioTrack flush
+  /// message is dispatched immediately via the platform channel, then removes
+  /// the feed callback and drains the Dart buffer so nothing new is queued.
+  ///
+  /// The subsequent async [pause()] will call release() again (idempotent —
+  /// the catch block handles an already-released player) and perform the full
+  /// state transition.  We deliberately do NOT change [_state] here so that
+  /// [pause()] can still proceed normally.
+  ///
+  /// Purpose: the native AudioTrack holds up to [_feedThreshold] frames
+  /// (~4 s) pre-buffered. Without an early release() call those frames play
+  /// through the OS audio-focus transition and produce crackling when another
+  /// app (camera, phone, etc.) takes focus.
   void silenceNow() {
     if (_state != PcmPlayerState.playing) return;
-    // Remove the native callback first so no new data is pushed.
+
+    // 1. Flush native AudioTrack buffer ASAP via unawaited platform channel call.
+    //    pause() will call release() again — the catch block there handles the
+    //    "already released" case gracefully.
+    unawaited(
+      pcm.FlutterPcmSound.release().catchError(
+        (e) => _logger.log('PcmAudioPlayer: silenceNow release error (expected): $e'),
+      ),
+    );
+    _isStarted = false;
+
+    // 2. Remove feed callback so the native side stops requesting more data.
     pcm.FlutterPcmSound.setFeedCallback(null);
-    // Drain our Dart buffer so pause() has nothing to re-feed.
+
+    // 3. Drain Dart buffer so pause() / play() have nothing stale to re-feed.
     _audioBuffer.clear();
-    _silencePaddingFed = _silencePaddingMaxChunks; // Suppress silence injection
-    _logger.log('PcmAudioPlayer: silenceNow — feed callback removed, buffer cleared');
+    _silencePaddingFed = _silencePaddingMaxChunks; // suppress silence injection
+    _isFeeding = false;
+
+    _logger.log('PcmAudioPlayer: silenceNow — release() fired, feed stopped, buffer cleared');
   }
 
   /// Handle stream errors - notify listeners and pause playback
@@ -634,8 +655,8 @@ class PcmAudioPlayer {
   /// Uses release() to clear native buffer for instant audio stop
   /// Returns true if pause was successful
   Future<bool> pause() async {
-    if (_state != PcmPlayerState.playing) {
-      _logger.log('PcmAudioPlayer: Cannot pause - not playing (state: $_state)');
+    if (_state != PcmPlayerState.playing && _state != PcmPlayerState.pausing) {
+      _logger.log('PcmAudioPlayer: Cannot pause - not playing/pausing (state: $_state)');
       return false;
     }
 
