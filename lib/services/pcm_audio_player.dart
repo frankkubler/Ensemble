@@ -75,21 +75,13 @@ class PcmAudioPlayer {
   // Error callback for operation failures
   PcmErrorCallback? onError;
 
-  // Maximum chunks to feed per AudioTrack.write() call (Java side).
-  // Each chunk is ~25ms, so 4 chunks = ~100ms per write(WRITE_BLOCKING) call.
-  //
-  // WHY THIS MATTERS FOR STOPPING:
-  // AudioTrack.write(WRITE_BLOCKING) is a JNI call — it is NOT interruptible.
-  // Thread.interrupt() only fires at the NEXT blocking take() call, NOT inside
-  // write(). With 120 chunks (3 s) in one write(), cleanup()/join() blocks
-  // the Android MAIN THREAD for up to 3 seconds, audio plays through the whole
-  // time, and stop()+flush() arrives 3 s late.
-  // With 4 chunks (100 ms), write() finishes in < 100 ms, the thread picks up
-  // the interrupt at the next take(), and join() returns almost instantly.
-  static const int _chunksPerJavaWrite = 4;
-
-  // Total chunks to process per _feedNextChunk() invocation (outer loop limit).
-  // 120 chunks × 25 ms = 3 seconds filled per feed-callback event.
+  // Chunks to concatenate into a single FlutterPcmSound.feed() call.
+  // The Java plugin internally splits each feed() into 200-frame ByteBuffers,
+  // so the actual write(WRITE_BLOCKING) per ByteBuffer is only ~4 ms regardless
+  // of how much Dart sends in one feed() call.
+  // Sending 120 chunks at once (3 s) minimises Dart platform-channel round-trips.
+  // Audio stop is instant because the forked cleanup() calls AudioTrack.pause()
+  // + mSamples.clear() before join(), so no crackle regardless of feed size.
   static const int _maxChunksPerFeed = 120;
 
   // Feed threshold — native requests more data when remaining frames drop below this.
@@ -431,11 +423,11 @@ class PcmAudioPlayer {
     onElapsedTimeUpdate?.call(elapsed);
   }
 
-  /// Feed available audio data to the native player.
-  /// Chunks are grouped into small Java-write batches of [_chunksPerJavaWrite]
-  /// (100 ms each) to keep AudioTrack.write() granularity small. This ensures
-  /// that cleanup()/interrupt() can exit the playback thread within ~100 ms
-  /// instead of blocking on a 3-second WRITE_BLOCKING call.
+  /// Feed available audio data to the native player in one batched call.
+  /// Up to [_maxChunksPerFeed] chunks (3 s) are concatenated into a single
+  /// FlutterPcmSound.feed() call to minimise platform-channel round-trips.
+  /// The Java plugin splits the buffer into ~4 ms ByteBuffers internally,
+  /// so the actual AudioTrack.write() granularity is always small.
   Future<void> _feedNextChunk() async {
     if (_isFeeding || _audioBuffer.isEmpty || _shouldBlockFeeding) return;
 
@@ -443,21 +435,16 @@ class PcmAudioPlayer {
     _feedCompleter = Completer<void>();
 
     try {
-      int totalChunksFed = 0;
       while (_audioBuffer.isNotEmpty &&
              _state == PcmPlayerState.playing &&
-             !_shouldBlockFeeding &&
-             totalChunksFed < _maxChunksPerFeed) {
-        // Collect _chunksPerJavaWrite chunks into one contiguous sample list.
-        // This controls the size of each AudioTrack.write() on the Java side,
-        // keeping write() non-blocking duration to ~100ms so interrupt() fires
-        // at the next take() call quickly.
+             !_shouldBlockFeeding) {
+        // Collect up to _maxChunksPerFeed chunks into one contiguous sample list.
         final allSamples = <int>[];
         int bytesConsumed = 0;
         int chunksConsumed = 0;
 
         while (_audioBuffer.isNotEmpty &&
-               chunksConsumed < _chunksPerJavaWrite &&
+               chunksConsumed < _maxChunksPerFeed &&
                !_shouldBlockFeeding) {
           final chunk = _audioBuffer.removeAt(0);
           final rawSamples = _bytesToInt16List(chunk);
@@ -508,7 +495,6 @@ class PcmAudioPlayer {
         if (!_shouldBlockFeeding) {
           _framesPlayed += chunksConsumed;
           _bytesPlayed += bytesConsumed;
-          totalChunksFed += chunksConsumed;
           if (_framesPlayed % 100 < chunksConsumed) {
             _logger.log('PcmAudioPlayer: Played $_framesPlayed frames (${(_bytesPlayed / 1024).toStringAsFixed(1)} KB)');
           }
@@ -550,43 +536,20 @@ class PcmAudioPlayer {
     return samples;
   }
 
-  /// Cut audio output as fast as possible — safe to call from any sync context.
+  /// Stop feeding data to the native player immediately.
   ///
-  /// Fires [FlutterPcmSound.release()] unawaited so the native AudioTrack flush
-  /// message is dispatched immediately via the platform channel, then removes
-  /// the feed callback and drains the Dart buffer so nothing new is queued.
-  ///
-  /// The subsequent async [pause()] will call release() again (idempotent —
-  /// the catch block handles an already-released player) and perform the full
-  /// state transition.  We deliberately do NOT change [_state] here so that
-  /// [pause()] can still proceed normally.
-  ///
-  /// Purpose: the native AudioTrack holds up to [_feedThreshold] frames
-  /// (~4 s) pre-buffered. Without an early release() call those frames play
-  /// through the OS audio-focus transition and produce crackling when another
-  /// app (camera, phone, etc.) takes focus.
+  /// Removes the feed callback and drains the Dart buffer so no new data
+  /// is queued. Does NOT call release() — the forked flutter_pcm_sound
+  /// plugin already handles instant audio cutoff in its cleanup() method
+  /// by calling AudioTrack.pause() + mSamples.clear() before join().
+  /// The caller must follow up with pause() to complete the state transition.
   void silenceNow() {
     if (_state != PcmPlayerState.playing) return;
-
-    // 1. Flush native AudioTrack buffer ASAP via unawaited platform channel call.
-    //    pause() will call release() again — the catch block there handles the
-    //    "already released" case gracefully.
-    unawaited(
-      pcm.FlutterPcmSound.release().catchError(
-        (e) => _logger.log('PcmAudioPlayer: silenceNow release error (expected): $e'),
-      ),
-    );
-    _isStarted = false;
-
-    // 2. Remove feed callback so the native side stops requesting more data.
     pcm.FlutterPcmSound.setFeedCallback(null);
-
-    // 3. Drain Dart buffer so pause() / play() have nothing stale to re-feed.
     _audioBuffer.clear();
-    _silencePaddingFed = _silencePaddingMaxChunks; // suppress silence injection
+    _silencePaddingFed = _silencePaddingMaxChunks;
     _isFeeding = false;
-
-    _logger.log('PcmAudioPlayer: silenceNow — release() fired, feed stopped, buffer cleared');
+    _logger.log('PcmAudioPlayer: silenceNow — feed stopped, Dart buffer cleared');
   }
 
   /// Handle stream errors - notify listeners and pause playback

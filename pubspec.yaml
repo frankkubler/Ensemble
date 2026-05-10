@@ -63,6 +63,16 @@ dev_dependencies:
   build_runner: ^2.4.13
   drift_dev: ^2.22.1
 
+# Use local fork of flutter_pcm_sound with a patched cleanup() method.
+# The upstream cleanup() calls join() without first pausing the AudioTrack,
+# so write(WRITE_BLOCKING) keeps feeding the DAC during the join() wait —
+# producing a crackle/pop when audio focus is lost (app switch, screen wake).
+# Fix: call AudioTrack.pause() + mSamples.clear() before join() so audio
+# stops at hardware level immediately, and join() returns in < 5 ms.
+dependency_overrides:
+  flutter_pcm_sound:
+    path: packages/flutter_pcm_sound
+
 flutter:
   generate: true
   uses-material-design: true
