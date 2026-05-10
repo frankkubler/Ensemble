@@ -211,44 +211,38 @@ public class FlutterPcmSoundPlugin implements
     /**
      * Cleans up resources by stopping the playback thread and releasing AudioTrack.
      *
-     * Critical fix: AudioTrack.pause() is called BEFORE join() so that:
-     * 1. Audio stops at the hardware level instantly (no more samples sent to DAC).
-     * 2. Any in-flight write(WRITE_BLOCKING) call in the playback thread returns
-     *    early because the AudioTrack is no longer consuming data.
-     * 3. mSamples is cleared so the playback thread doesn't loop over stale data
-     *    and exits quickly at the next loop-condition check.
+     * Fix: setVolume(0) is called before join() so AudioFlinger immediately mutes
+     * our track's contribution to the mix. This eliminates the crackle/pop that
+     * occurs when audio focus is lost (app switch, screen wake, etc.).
      *
-     * Without this fix, cleanup() calls join() while the playback thread may still
-     * be writing audio to the AudioTrack, causing the crackle/pop heard when another
-     * app takes audio focus (Gmail, Camera, phone wake, etc.). The old approach
-     * relied on Thread.interrupt() which only fires at the next take() call, not
-     * inside write(WRITE_BLOCKING) — meaning up to one extra 4ms chunk plays through.
+     * Why NOT pause(): pause() stops AudioFlinger from consuming the AudioTrack's
+     * internal ring buffer, so any in-progress write(WRITE_BLOCKING) blocks
+     * indefinitely waiting for buffer space → join() deadlocks.
+     *
+     * Why setVolume(0) works: it only changes the gain applied by AudioFlinger
+     * during mixing. The write() operation continues normally (puts data in the
+     * ring buffer), the thread exits cleanly at the next loop iteration, and
+     * stop()+flush() are called with silence already in effect.
      */
     private void cleanup() {
         if (playbackThread != null) {
             mShouldCleanup = true;
 
-            // 1. Drain the pending-samples queue — the playback thread won't
-            //    have stale ByteBuffers to process after exiting the while loop.
-            mSamples.clear();
-
-            // 2. Pause the AudioTrack immediately from THIS thread.
-            //    AudioTrack.pause() is documented as thread-safe. Calling it here
-            //    causes the hardware to stop playing RIGHT NOW, without waiting
-            //    for the playback thread to finish its current write(). The
-            //    playback thread will then call stop()/flush()/release() as usual.
+            // Mute immediately — takes effect on the next AudioFlinger mix cycle
+            // (~2-5ms), which is faster than any platform-channel round-trip.
+            // Thread-safe per AudioTrack documentation.
             if (mAudioTrack != null) {
-                try { mAudioTrack.pause(); } catch (Exception ignored) {}
+                try { mAudioTrack.setVolume(0.0f); } catch (Exception ignored) {}
             }
 
-            // 3. Interrupt the playback thread so take() unblocks immediately
-            //    (takes effect at the next blocking take() call after pause).
+            // Discard pending samples so the thread exits quickly.
+            mSamples.clear();
+
+            // Wake up the thread if it is blocked in take().
             playbackThread.interrupt();
 
-            // 4. Wait for the thread to finish — with the queue cleared and the
-            //    AudioTrack paused, this returns in < 5 ms in practice.
-            //    A 500 ms timeout prevents blocking the Android main thread if
-            //    something unexpected happens.
+            // Wait for the playback thread to finish. With mSamples cleared and
+            // mShouldCleanup=true it exits after at most one write() (~4 ms).
             try {
                 playbackThread.join(500);
             } catch (InterruptedException e) {
