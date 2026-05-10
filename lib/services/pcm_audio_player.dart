@@ -75,13 +75,21 @@ class PcmAudioPlayer {
   // Error callback for operation failures
   PcmErrorCallback? onError;
 
-  // Maximum chunks to feed at once to keep native buffer small (~200ms)
-  // Each chunk is ~25ms of audio, so 12 chunks = ~300ms.
-  // Feed as many chunks as possible per cycle so the native buffer stays full.
-  // Large native buffer = resilient in background (Dart is throttled by Android,
-  // native PCM thread is not). pause() uses release() which clears the native
-  // buffer instantly, so buffer size has NO effect on pause latency.
-  // 120 chunks × 25ms = 3 seconds of audio per feed burst.
+  // Maximum chunks to feed per AudioTrack.write() call (Java side).
+  // Each chunk is ~25ms, so 4 chunks = ~100ms per write(WRITE_BLOCKING) call.
+  //
+  // WHY THIS MATTERS FOR STOPPING:
+  // AudioTrack.write(WRITE_BLOCKING) is a JNI call — it is NOT interruptible.
+  // Thread.interrupt() only fires at the NEXT blocking take() call, NOT inside
+  // write(). With 120 chunks (3 s) in one write(), cleanup()/join() blocks
+  // the Android MAIN THREAD for up to 3 seconds, audio plays through the whole
+  // time, and stop()+flush() arrives 3 s late.
+  // With 4 chunks (100 ms), write() finishes in < 100 ms, the thread picks up
+  // the interrupt at the next take(), and join() returns almost instantly.
+  static const int _chunksPerJavaWrite = 4;
+
+  // Total chunks to process per _feedNextChunk() invocation (outer loop limit).
+  // 120 chunks × 25 ms = 3 seconds filled per feed-callback event.
   static const int _maxChunksPerFeed = 120;
 
   // Feed threshold — native requests more data when remaining frames drop below this.
@@ -423,12 +431,11 @@ class PcmAudioPlayer {
     onElapsedTimeUpdate?.call(elapsed);
   }
 
-  /// Feed available audio data to the native player — batched for efficiency.
-  /// All available chunks (up to _maxChunksPerFeed) are concatenated into one
-  /// Int16List and pushed with a SINGLE feed() call. Benefits:
-  ///   • Minimises platform-channel round-trips (1 call vs N).
-  ///   • Pushes as much data as possible into the native buffer at once,
-  ///     so the buffer is full even when Dart is throttled in background.
+  /// Feed available audio data to the native player.
+  /// Chunks are grouped into small Java-write batches of [_chunksPerJavaWrite]
+  /// (100 ms each) to keep AudioTrack.write() granularity small. This ensures
+  /// that cleanup()/interrupt() can exit the playback thread within ~100 ms
+  /// instead of blocking on a 3-second WRITE_BLOCKING call.
   Future<void> _feedNextChunk() async {
     if (_isFeeding || _audioBuffer.isEmpty || _shouldBlockFeeding) return;
 
@@ -436,16 +443,21 @@ class PcmAudioPlayer {
     _feedCompleter = Completer<void>();
 
     try {
+      int totalChunksFed = 0;
       while (_audioBuffer.isNotEmpty &&
              _state == PcmPlayerState.playing &&
-             !_shouldBlockFeeding) {
-        // Collect up to _maxChunksPerFeed chunks into one contiguous sample list.
+             !_shouldBlockFeeding &&
+             totalChunksFed < _maxChunksPerFeed) {
+        // Collect _chunksPerJavaWrite chunks into one contiguous sample list.
+        // This controls the size of each AudioTrack.write() on the Java side,
+        // keeping write() non-blocking duration to ~100ms so interrupt() fires
+        // at the next take() call quickly.
         final allSamples = <int>[];
         int bytesConsumed = 0;
         int chunksConsumed = 0;
 
         while (_audioBuffer.isNotEmpty &&
-               chunksConsumed < _maxChunksPerFeed &&
+               chunksConsumed < _chunksPerJavaWrite &&
                !_shouldBlockFeeding) {
           final chunk = _audioBuffer.removeAt(0);
           final rawSamples = _bytesToInt16List(chunk);
@@ -496,6 +508,7 @@ class PcmAudioPlayer {
         if (!_shouldBlockFeeding) {
           _framesPlayed += chunksConsumed;
           _bytesPlayed += bytesConsumed;
+          totalChunksFed += chunksConsumed;
           if (_framesPlayed % 100 < chunksConsumed) {
             _logger.log('PcmAudioPlayer: Played $_framesPlayed frames (${(_bytesPlayed / 1024).toStringAsFixed(1)} KB)');
           }
