@@ -310,8 +310,13 @@ public class FlutterPcmSoundPlugin implements
             }
         }
 
-        mAudioTrack.stop();
+        // Correct stop sequence for MODE_STREAM:
+        // stop() alone drains the AudioFlinger internal buffer before stopping (~18ms).
+        // pause() first causes an immediate hardware cutoff, then flush() clears
+        // the buffer, then stop() is instant (nothing left to drain).
+        mAudioTrack.pause();
         mAudioTrack.flush();
+        mAudioTrack.stop();
         mAudioTrack.release();
         mAudioTrack = null;
     }
