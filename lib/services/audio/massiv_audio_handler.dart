@@ -132,7 +132,6 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             _player.setVolume(0.5);
             break;
           case AudioInterruptionType.pause:
-          case AudioInterruptionType.unknown:
             // Only track as "was playing" if actually playing — NOT just because
             // the builtin player is selected. _isBuiltinPlayerActive is true even
             // when paused, which caused auto-resume when another app (e.g. Instagram)
@@ -142,6 +141,14 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               _player.pause();
               onPause?.call();
             }
+            break;
+          case AudioInterruptionType.unknown:
+            // Ignore unknown interruptions — these are typically transient system
+            // events (screen wake, OEM lock-screen sounds, vibration triggers) that
+            // do NOT correspond to a real audio focus change. Pausing here causes
+            // the music to stop briefly on screen wake on many Android OEM ROMs
+            // (Samsung, Xiaomi, Oppo…) even in silent mode.
+            _logger.log('🔊 Audio interruption type=unknown — ignored (system event)');
             break;
         }
       } else {
