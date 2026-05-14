@@ -2153,8 +2153,15 @@ class MusicAssistantProvider with ChangeNotifier {
         await pausePlayer(targetPlayerId);
       }
     };
+    audioHandler.onSoftPause = () {
+      _logger.log('🔊 PCM soft-pause: muting AudioTrack (audio focus lost)');
+      unawaited(_pcmAudioPlayer?.softPause());
+    };
+    audioHandler.onSoftResume = () {
+      _logger.log('🔊 PCM soft-resume: resuming AudioTrack (audio focus restored)');
+      unawaited(_pcmAudioPlayer?.softResume());
+    };
     audioHandler.onSwitchPlayer = () {
-      _logger.log('🎵 Notification: Switch player pressed');
       selectNextPlayer();
     };
     audioHandler.onBrowseActivity = () {

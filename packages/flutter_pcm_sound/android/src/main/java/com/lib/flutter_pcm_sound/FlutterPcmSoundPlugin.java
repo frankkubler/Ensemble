@@ -41,6 +41,7 @@ public class FlutterPcmSoundPlugin implements
     private Handler mainThreadHandler = new Handler(Looper.getMainLooper());
     private Thread playbackThread;
     private volatile boolean mShouldCleanup = false;
+    private volatile boolean mSoftPaused = false;
 
     private AudioTrack mAudioTrack;
     private int mNumChannels;
@@ -142,6 +143,7 @@ public class FlutterPcmSoundPlugin implements
                     // reset
                     mSamples.clear();
                     mShouldCleanup = false;
+                    mSoftPaused = false;
 
                     // start playback thread
                     playbackThread = new Thread(this::playbackThreadLoop, "PCMPlaybackThread");
@@ -187,6 +189,16 @@ public class FlutterPcmSoundPlugin implements
                     result.success(true);
                     break;
                 }
+                case "softPause": {
+                    softPause();
+                    result.success(true);
+                    break;
+                }
+                case "softResume": {
+                    softResume();
+                    result.success(true);
+                    break;
+                }
                 case "release": {
                     cleanup();
                     result.success(true);
@@ -215,6 +227,7 @@ public class FlutterPcmSoundPlugin implements
         // stop playback thread
         if (playbackThread != null) {
             mShouldCleanup = true;
+            mSoftPaused = false;  // wake thread from soft-pause sleep so it sees mShouldCleanup
             // Mute immediately — takes effect on the next AudioFlinger mix cycle (~2-5ms)
             // before any stop/flush reaches the DAC, preventing an audible click/pop.
             if (mAudioTrack != null) {
@@ -236,6 +249,30 @@ public class FlutterPcmSoundPlugin implements
     }
 
     /**
+     * Silently pauses AudioTrack output without releasing it.
+     * The playback thread is held; mSamples queue is preserved.
+     * Call softResume() to restart output.
+     */
+    private void softPause() {
+        if (!mDidSetup || mAudioTrack == null) return;
+        // Set flag before pause() so the thread sees it on the next loop iteration.
+        mSoftPaused = true;
+        try { mAudioTrack.setVolume(0.0f); } catch (Exception ignored) {}
+        mAudioTrack.pause();
+    }
+
+    /**
+     * Resumes AudioTrack output after softPause().
+     */
+    private void softResume() {
+        if (!mDidSetup || mAudioTrack == null) return;
+        try { mAudioTrack.setVolume(1.0f); } catch (Exception ignored) {}
+        mAudioTrack.play();
+        // Clear flag after play() so the thread won't write before AudioTrack is active.
+        mSoftPaused = false;
+    }
+
+    /**
      * Invokes the 'OnFeedSamples' callback with the number of remaining frames.
      */
     private void invokeFeedCallback(long remainingFrames) {
@@ -253,14 +290,24 @@ public class FlutterPcmSoundPlugin implements
         mAudioTrack.play();
 
         while (!mShouldCleanup) {
+            // When soft-paused (audio focus lost), hold the thread without consuming
+            // buffered samples. The AudioTrack is paused so no DMA output occurs.
+            if (mSoftPaused) {
+                try { Thread.sleep(20); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                continue;
+            }
+
             ByteBuffer data = null;
             try {
-                // blocks indefinitely until new data
-                data = mSamples.take();
+                // Poll with timeout so the loop re-checks mShouldCleanup / mSoftPaused
+                // after at most 100 ms even when the queue is empty.
+                data = mSamples.poll(100, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 continue;
             }
+
+            if (data == null) continue; // timeout — re-check flags
 
             // write
             mAudioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);

@@ -37,6 +37,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   Function()? onSkipToPrevious;
   Function()? onPlay;
   Function()? onPause;
+  Function()? onSoftPause;
+  Function()? onSoftResume;
   Function()? onSwitchPlayer;
   Function()? onBrowseActivity;
   Function()? onAAConnected;
@@ -144,6 +146,10 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             // (_player.pause() operates on the inactive just_audio instance only.)
             if (_wasPlayingBeforeInterruption) {
               _player.pause();
+              // Silently pause the PCM AudioTrack — no stream restart, no
+              // round-trip to the MA server. Audio resumes from exactly where
+              // it left off when focus is restored.
+              onSoftPause?.call();
             }
             break;
           case AudioInterruptionType.unknown:
@@ -180,10 +186,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               break;
             }
             _player.play();
-            // Do NOT call onPlay?.call() here — for Sendspin/PCM playback the stream
-            // never stopped (we only paused the inactive just_audio instance above).
-            // Calling onPlay would trigger resumePlayer() → MA server reply stream/end
-            // + stream/start → FlutterPcmSound.release() → AudioTrack stop → crackle.
+            // Resume the PCM AudioTrack silently — no server round-trip.
+            onSoftResume?.call();
             break;
           case AudioInterruptionType.unknown:
             break;

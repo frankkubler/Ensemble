@@ -90,6 +90,18 @@ class FlutterPcmSound {
     return await _invokeMethod('release');
   }
 
+  /// Pause AudioTrack output without releasing it.
+  /// The playback thread keeps running; buffered samples are preserved.
+  /// Call [softResume] to restart output silently.
+  static Future<void> softPause() async {
+    return await _invokeMethod('softPause');
+  }
+
+  /// Resume AudioTrack output after [softPause].
+  static Future<void> softResume() async {
+    return await _invokeMethod('softResume');
+  }
+
   static Future<T?> _invokeMethod<T>(String method, [dynamic arguments]) async {
     if (_logLevel.index >= LogLevel.standard.index) {
       String args = '';
