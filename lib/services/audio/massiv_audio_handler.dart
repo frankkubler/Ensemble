@@ -137,9 +137,13 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             // when paused, which caused auto-resume when another app (e.g. Instagram)
             // released audio focus after the user had manually paused the player.
             _wasPlayingBeforeInterruption = playbackState.value.playing;
+            // Do NOT pause the PCM player on focus loss — abruptly stopping the
+            // AudioTrack causes an audible click/pop. Android's AudioFlinger
+            // handles mixing/ducking at OS level; the Sendspin stream keeps
+            // playing through the interruption without any crackle.
+            // (_player.pause() operates on the inactive just_audio instance only.)
             if (_wasPlayingBeforeInterruption) {
               _player.pause();
-              onPause?.call();
             }
             break;
           case AudioInterruptionType.unknown:
