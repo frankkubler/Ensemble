@@ -63,6 +63,13 @@ dev_dependencies:
   build_runner: ^2.4.13
   drift_dev: ^2.22.1
 
+# Patched flutter_pcm_sound: cleanup() mutes AudioTrack before join() to
+# eliminate click/pop on every pause/stop. Also adds mSamples.clear(),
+# join(500) timeout, and correct AudioTrack.pause()+flush()+stop() exit sequence.
+dependency_overrides:
+  flutter_pcm_sound:
+    path: packages/flutter_pcm_sound
+
 flutter:
   generate: true
   uses-material-design: true

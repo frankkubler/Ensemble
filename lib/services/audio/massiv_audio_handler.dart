@@ -180,7 +180,10 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               break;
             }
             _player.play();
-            onPlay?.call();
+            // Do NOT call onPlay?.call() here — for Sendspin/PCM playback the stream
+            // never stopped (we only paused the inactive just_audio instance above).
+            // Calling onPlay would trigger resumePlayer() → MA server reply stream/end
+            // + stream/start → FlutterPcmSound.release() → AudioTrack stop → crackle.
             break;
           case AudioInterruptionType.unknown:
             break;
