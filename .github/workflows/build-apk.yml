@@ -75,7 +75,7 @@ jobs:
         run: flutter build apk --release
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: ensemble-apk
           path: build/app/outputs/flutter-apk/app-release.apk
