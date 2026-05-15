@@ -681,30 +681,6 @@ class PcmAudioPlayer {
     return true;
   }
 
-  /// Silently pause the AudioTrack without releasing it or notifying the MA server.
-  /// The Sendspin stream continues server-side; buffered samples are preserved.
-  /// Call [softResume] to restart output with zero latency.
-  Future<void> softPause() async {
-    if (_state != PcmPlayerState.playing) return;
-    _logger.log('PcmAudioPlayer: softPause — pausing AudioTrack (no release)');
-    try {
-      await pcm.FlutterPcmSound.softPause();
-    } catch (e) {
-      _logger.log('PcmAudioPlayer: softPause error: $e');
-    }
-  }
-
-  /// Resume AudioTrack output after [softPause].
-  Future<void> softResume() async {
-    if (_state != PcmPlayerState.playing) return;
-    _logger.log('PcmAudioPlayer: softResume — resuming AudioTrack');
-    try {
-      await pcm.FlutterPcmSound.softResume();
-    } catch (e) {
-      _logger.log('PcmAudioPlayer: softResume error: $e');
-    }
-  }
-
   /// Stop playback (clears buffer and resets position)
   /// Returns true if stop was successful
   Future<bool> stop() async {
