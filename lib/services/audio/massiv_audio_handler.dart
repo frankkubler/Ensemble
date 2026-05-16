@@ -91,10 +91,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   // tones, etc.). A pause interruption is only acted on if it lasts more than
   // 800 ms — brief ones are skipped to avoid a full server round-trip stop/restart.
   Timer? _interruptionDebounceTimer;
-
-  // Callback: PCM/Sendspin volume duck (0.0–1.0). Set by MusicAssistantProvider.
-  // Used instead of _player.setVolume() because just_audio is idle in Sendspin mode.
-  Function(double)? onDuck;
+  DateTime? _interruptionBeganAt;  // Timestamp for interruption duration logging
 
   // Custom control for switching players
   static final _switchPlayerControl = MediaControl.custom(
@@ -156,10 +153,12 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               // Debounce: ignore transient interruptions (camera shutter, notification
               // tones…) that last under 800ms. Each full server-side pause/resume
               // cycle produces two audible clicks; short interruptions should be silent.
+              _interruptionBeganAt = DateTime.now();
               _interruptionDebounceTimer?.cancel();
               _interruptionDebounceTimer = Timer(const Duration(milliseconds: 800), () {
+                final duration = DateTime.now().difference(_interruptionBeganAt!);
                 _interruptionDebounceTimer = null;
-                _logger.log('🔊 Audio interruption pause: debounce elapsed — pausing');
+                _logger.log('🔊 Audio interruption pause: debounce elapsed (${duration.inMilliseconds}ms) — pausing');
                 onPause?.call();
               });
             }
@@ -186,9 +185,12 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             // If the debounce timer is still pending, the interruption was brief —
             // cancel the timer and skip both pause and resume to avoid server round-trip.
             if (_interruptionDebounceTimer != null) {
+              final duration = _interruptionBeganAt != null
+                  ? DateTime.now().difference(_interruptionBeganAt!).inMilliseconds
+                  : -1;
               _interruptionDebounceTimer!.cancel();
               _interruptionDebounceTimer = null;
-              _logger.log('🔊 Audio interruption ended before debounce — skipped (transient)');
+              _logger.log('🔊 Audio interruption ended after ${duration}ms — skipped (transient, <800ms)');
               break;
             }
             if (_suppressResume) {

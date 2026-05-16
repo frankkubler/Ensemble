@@ -215,21 +215,40 @@ class PcmAudioPlayer {
   void _onFeedRequested(int remainingFrames) {
     // This is called from native when buffer is getting low
     // Block feeding during pause, transitional states, or when not playing
-    if (_state != PcmPlayerState.playing) return;
-    if (_shouldBlockFeeding) return;
+    if (_state != PcmPlayerState.playing) {
+      _logger.log('PcmAudioPlayer: feed callback blocked (state=$_state, remainingFrames=$remainingFrames)');
+      return;
+    }
+    if (_shouldBlockFeeding) {
+      _logger.log('PcmAudioPlayer: feed callback blocked (shouldBlockFeeding, remainingFrames=$remainingFrames)');
+      return;
+    }
     if (_isFeeding) return;
     // Native player not yet started (preroll in progress) — don't inject silence
     if (!_isStarted) return;
+
+    // Warn when native buffer drops into dangerous territory.
+    // At 48kHz stereo this is: 96000=2s, 48000=1s, 24000=0.5s.
+    if (remainingFrames < 96000) {
+      _logger.log('⚠️ PcmAudioPlayer: Low native buffer: ${remainingFrames} frames '
+          '(${(remainingFrames / 48000).toStringAsFixed(2)}s), '
+          'dartBuffer=${_audioBuffer.length} chunks, '
+          'state=$_state, isStarted=$_isStarted');
+    }
 
     // Silence padding: when buffer is empty during playback, feed silence DIRECTLY
     // to the native player — intentionally bypasses _audioBuffer so that real audio
     // arriving later is NOT delayed by silence chunks in the queue.
     // Guard: only inject when the native buffer is truly running low. If
-    // remainingFrames is high (e.g. 4s with threshold=192000), the Dart buffer is
+    // remainingFrames is high (e.g. 10s with threshold=480000), the Dart buffer is
     // just momentarily empty between network bursts — injecting silence here would
     // create an audible click in an otherwise continuous audio stream.
     if (_audioBuffer.isEmpty && !_userPaused && _silencePaddingFed < _silencePaddingMaxChunks) {
-      if (remainingFrames > _silenceInjectionThreshold) return;
+      if (remainingFrames > _silenceInjectionThreshold) {
+        _logger.log('PcmAudioPlayer: Dart buffer empty but native has ${remainingFrames} frames '
+            '(${(remainingFrames / 48000).toStringAsFixed(2)}s) — skipping silence (between bursts)');
+        return;
+      }
       _silencePaddingFed++;
       if (_silencePaddingFed == 1) {
         _logger.log('PcmAudioPlayer: Network stall ($remainingFrames frames left) — injecting silence to prevent crackle');
