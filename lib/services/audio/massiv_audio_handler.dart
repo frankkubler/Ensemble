@@ -87,6 +87,15 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   bool _aaNativeChannelAvailable = true;
   bool _loggedAANativeChannelMissing = false;
 
+  // Debounce timer for transient audio interruptions (camera shutter, notification
+  // tones, etc.). A pause interruption is only acted on if it lasts more than
+  // 800 ms — brief ones are skipped to avoid a full server round-trip stop/restart.
+  Timer? _interruptionDebounceTimer;
+
+  // Callback: PCM/Sendspin volume duck (0.0–1.0). Set by MusicAssistantProvider.
+  // Used instead of _player.setVolume() because just_audio is idle in Sendspin mode.
+  Function(double)? onDuck;
+
   // Custom control for switching players
   static final _switchPlayerControl = MediaControl.custom(
     androidIcon: 'drawable/ic_switch_player',
@@ -129,7 +138,13 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       if (event.begin) {
         switch (event.type) {
           case AudioInterruptionType.duck:
-            _player.setVolume(0.5);
+            // In Sendspin/PCM mode just_audio is idle; duck via the PCM volume gain
+            // callback instead. Fall back to _player.setVolume for just_audio mode.
+            if (onDuck != null) {
+              onDuck!.call(0.5);
+            } else {
+              _player.setVolume(0.5);
+            }
             break;
           case AudioInterruptionType.pause:
             // In Sendspin/PCM mode just_audio is idle so playbackState.value.playing
@@ -138,7 +153,15 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             _wasPlayingBeforeInterruption =
                 playbackState.value.playing || _isBuiltinPlayerActive;
             if (_wasPlayingBeforeInterruption) {
-              onPause?.call();
+              // Debounce: ignore transient interruptions (camera shutter, notification
+              // tones…) that last under 800ms. Each full server-side pause/resume
+              // cycle produces two audible clicks; short interruptions should be silent.
+              _interruptionDebounceTimer?.cancel();
+              _interruptionDebounceTimer = Timer(const Duration(milliseconds: 800), () {
+                _interruptionDebounceTimer = null;
+                _logger.log('🔊 Audio interruption pause: debounce elapsed — pausing');
+                onPause?.call();
+              });
             }
             break;
           case AudioInterruptionType.unknown:
@@ -153,9 +176,21 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       } else {
         switch (event.type) {
           case AudioInterruptionType.duck:
-            _player.setVolume(1.0);
+            if (onDuck != null) {
+              onDuck!.call(1.0);
+            } else {
+              _player.setVolume(1.0);
+            }
             break;
           case AudioInterruptionType.pause:
+            // If the debounce timer is still pending, the interruption was brief —
+            // cancel the timer and skip both pause and resume to avoid server round-trip.
+            if (_interruptionDebounceTimer != null) {
+              _interruptionDebounceTimer!.cancel();
+              _interruptionDebounceTimer = null;
+              _logger.log('🔊 Audio interruption ended before debounce — skipped (transient)');
+              break;
+            }
             if (_suppressResume) {
               _logger.log('🔊 Audio interruption ended but resume suppressed (audio route changed)');
               _suppressResume = false;
@@ -1434,6 +1469,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   /// Dispose of resources and cancel all subscriptions
   Future<void> dispose() async {
     _queueRefreshTimer?.cancel();
+    _interruptionDebounceTimer?.cancel();
     await _interruptionSubscription?.cancel();
     await _becomingNoisySubscription?.cancel();
     await _playbackEventSubscription?.cancel();

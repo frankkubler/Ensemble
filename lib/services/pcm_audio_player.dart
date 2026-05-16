@@ -89,8 +89,11 @@ class PcmAudioPlayer {
   // background, so a HIGH threshold gives more time for Dart to respond before
   // the buffer empties. pause() uses release() so the native buffer size has NO
   // effect on pause latency — we can safely make this as large as we like.
-  // 192000 frames @ 48kHz stereo = 4 seconds of headroom.
-  static const int _feedThreshold = 192000;
+  // 480000 frames @ 48kHz stereo = 10 seconds of headroom.
+  // The larger value is critical under heavy CPU load (e.g. camera app): the Dart
+  // event loop can stall for several seconds while the GPU/camera pipeline runs,
+  // and 10s of native buffer survives those stalls without underrunning.
+  static const int _feedThreshold = 480000;
 
   // Require a preroll buffer before starting playback to ensure the native player
   // has enough data on the first feed cycle.

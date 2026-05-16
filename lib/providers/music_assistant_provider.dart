@@ -2153,6 +2153,13 @@ class MusicAssistantProvider with ChangeNotifier {
         await pausePlayer(targetPlayerId);
       }
     };
+    // Duck PCM volume when another app requests transient audio focus with ducking
+    // (e.g. navigation instructions, notification tones). In Sendspin/PCM mode
+    // just_audio is idle so audioHandler._player.setVolume() has no effect; we
+    // must duck directly through the PcmAudioPlayer volume gain.
+    audioHandler.onDuck = (double gain) {
+      _pcmAudioPlayer?.setVolumeGain(gain);
+    };
     audioHandler.onSwitchPlayer = () {
       selectNextPlayer();
     };
