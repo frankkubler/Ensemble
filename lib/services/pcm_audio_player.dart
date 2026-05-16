@@ -121,6 +121,10 @@ class PcmAudioPlayer {
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
 
+  // Feed callback diagnostic counter — used to throttle verbose logging
+  int _feedCallbackCount = 0;
+  int _lastLoggedFeedCallback = 0;
+
   // Stats
   int _framesPlayed = 0;
   int _bytesPlayed = 0;
@@ -138,6 +142,14 @@ class PcmAudioPlayer {
   bool get isPlaying => _state == PcmPlayerState.playing;
   bool get isPaused => _state == PcmPlayerState.paused;
   bool get isReady => _state == PcmPlayerState.ready || _state == PcmPlayerState.playing || _state == PcmPlayerState.paused;
+
+  /// Log a concise health snapshot — call this from app lifecycle events.
+  void logStatus(String context) {
+    _logger.log('PcmAudioPlayer [$context]: state=$_state, isStarted=$_isStarted, '
+        'dartBuffer=${_audioBuffer.length} chunks, '
+        'isFeeding=$_isFeeding, userPaused=$_userPaused, '
+        'feedCallbacks=$_feedCallbackCount');
+  }
   int get framesPlayed => _framesPlayed;
   int get bytesPlayed => _bytesPlayed;
 
@@ -213,6 +225,8 @@ class PcmAudioPlayer {
 
   /// Callback when flutter_pcm_sound needs more audio data
   void _onFeedRequested(int remainingFrames) {
+    _feedCallbackCount++;
+
     // This is called from native when buffer is getting low
     // Block feeding during pause, transitional states, or when not playing
     if (_state != PcmPlayerState.playing) {
@@ -227,13 +241,13 @@ class PcmAudioPlayer {
     // Native player not yet started (preroll in progress) — don't inject silence
     if (!_isStarted) return;
 
-    // Warn when native buffer drops into dangerous territory.
-    // At 48kHz stereo this is: 96000=2s, 48000=1s, 24000=0.5s.
-    if (remainingFrames < 96000) {
-      _logger.log('⚠️ PcmAudioPlayer: Low native buffer: ${remainingFrames} frames '
-          '(${(remainingFrames / 48000).toStringAsFixed(2)}s), '
-          'dartBuffer=${_audioBuffer.length} chunks, '
-          'state=$_state, isStarted=$_isStarted');
+    // Log every 10th callback to show native buffer level without spamming
+    if (_feedCallbackCount - _lastLoggedFeedCallback >= 10) {
+      _lastLoggedFeedCallback = _feedCallbackCount;
+      _logger.log('PcmAudioPlayer: feed#$_feedCallbackCount '
+          'remainingFrames=$remainingFrames '
+          '(${(remainingFrames / 48000).toStringAsFixed(1)}s), '
+          'dartBuffer=${_audioBuffer.length} chunks');
     }
 
     // Silence padding: when buffer is empty during playback, feed silence DIRECTLY

@@ -312,9 +312,13 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
     if (state == AppLifecycleState.resumed) {
       // App came back to foreground - check connection and reconnect if needed
       _logger.log('📱 App resumed - checking WebSocket connection...');
+      _musicProvider.logPcmStatus('app-resumed');
       _musicProvider.checkAndReconnect();
     } else if (state == AppLifecycleState.paused) {
       _logger.log('📱 App paused (backgrounded)');
+      _musicProvider.logPcmStatus('app-paused');
+    } else if (state == AppLifecycleState.inactive) {
+      _musicProvider.logPcmStatus('app-inactive');
     } else if (state == AppLifecycleState.detached) {
       _logger.log('📱 App detached (being destroyed)');
     }
