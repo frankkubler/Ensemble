@@ -108,6 +108,13 @@ class PcmAudioPlayer {
   static const int _silencePaddingMaxChunks = 32; // 32 × 25ms = 800ms
   int _silencePaddingFed = 0;
 
+  // Minimum native buffer level (in frames) below which silence injection is
+  // allowed. With _feedThreshold = 192000 (4s), _onFeedRequested fires early
+  // while the native AudioTrack still has seconds of audio. Injecting silence
+  // at that point creates an audible click in the middle of the stream.
+  // Only inject once the native buffer is truly low (< 1s = 48000 frames).
+  static const int _silenceInjectionThreshold = 48000; // 1s @ 48kHz
+
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
 
@@ -214,11 +221,15 @@ class PcmAudioPlayer {
     // Silence padding: when buffer is empty during playback, feed silence DIRECTLY
     // to the native player — intentionally bypasses _audioBuffer so that real audio
     // arriving later is NOT delayed by silence chunks in the queue.
-    // Bridges up to 800ms of network stall without mixing silence into the audio timeline.
+    // Guard: only inject when the native buffer is truly running low. If
+    // remainingFrames is high (e.g. 4s with threshold=192000), the Dart buffer is
+    // just momentarily empty between network bursts — injecting silence here would
+    // create an audible click in an otherwise continuous audio stream.
     if (_audioBuffer.isEmpty && !_userPaused && _silencePaddingFed < _silencePaddingMaxChunks) {
+      if (remainingFrames > _silenceInjectionThreshold) return;
       _silencePaddingFed++;
       if (_silencePaddingFed == 1) {
-        _logger.log('PcmAudioPlayer: Network stall — injecting silence to prevent crackle');
+        _logger.log('PcmAudioPlayer: Network stall ($remainingFrames frames left) — injecting silence to prevent crackle');
       }
       _feedSilenceChunk();
       return;
