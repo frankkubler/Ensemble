@@ -236,6 +236,7 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     // Broadcast current media item changes (only for local just_audio playback)
     _currentIndexSubscription = _player.currentIndexStream.listen((_) {
       if (_isRemoteMode) return; // Don't resend metadata in remote/Sendspin mode
+      if (_isBuiltinPlayerActive) return; // Notification managed by updateLocalModeNotification
       if (_currentMediaItem != null) {
         _logger.log('🎵 currentIndexStream: re-adding mediaItem');
         mediaItem.add(_currentMediaItem);

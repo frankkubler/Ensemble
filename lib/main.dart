@@ -313,7 +313,14 @@ class _MusicAssistantAppState extends State<MusicAssistantApp> with WidgetsBindi
       // App came back to foreground - check connection and reconnect if needed
       _logger.log('📱 App resumed - checking WebSocket connection...');
       _musicProvider.logPcmStatus('app-resumed');
-      _musicProvider.checkAndReconnect();
+      if (_musicProvider.isPcmPlaying) {
+        // Defer CPU-heavy reconnect to avoid spiking during Android audio HAL
+        // wake-up after Doze — coincident CPU spike can cause AudioTrack stall.
+        _logger.log('📱 PCM playing — deferring reconnect check by 800ms');
+        Future.delayed(const Duration(milliseconds: 800), _musicProvider.checkAndReconnect);
+      } else {
+        _musicProvider.checkAndReconnect();
+      }
     } else if (state == AppLifecycleState.paused) {
       _logger.log('📱 App paused (backgrounded)');
       _musicProvider.logPcmStatus('app-paused');

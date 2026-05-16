@@ -6622,7 +6622,12 @@ class MusicAssistantProvider with ChangeNotifier {
       // Get builtin player ID - this is cached so should be fast
       final builtinPlayerId = await SettingsService.getBuiltinPlayerId();
 
-      if (builtinPlayerId != null && playerId == builtinPlayerId && _sendspinConnected) {
+      // Use _matchesBuiltinId (not ==) to handle the 'up' prefix that the MA
+      // server prepends to Sendspin/universal player IDs. Without this, a player
+      // registered as "upensemble_frank_..." would NOT match the stored
+      // "ensemble_frank_..." ID, silenceNow()/pause() would be skipped, and
+      // the PCM audio would keep playing from the native buffer for up to 10s.
+      if (builtinPlayerId != null && _matchesBuiltinId(playerId, builtinPlayerId) && _sendspinConnected) {
         _logger.log('⏸️ Non-blocking local pause for builtin player');
 
         // Synchronously cut PCM output before awaiting anything.
@@ -6853,8 +6858,15 @@ class MusicAssistantProvider with ChangeNotifier {
         _logger.log('🚗 AA reconnect: pre-filled MediaSession with "${cachedTrack.name}" (paused)');
       }
 
-      // Small delay to let the server finish its own AA handshake
-      await Future.delayed(const Duration(seconds: 2));
+      // Immediately sync the cached queue to MediaSession so AA shows the queue
+      // button right away — don't wait for the 2-second server handshake delay.
+      final cachedQueueForAA = await getCachedQueue(playerId);
+      if (cachedQueueForAA != null && cachedQueueForAA.items.isNotEmpty) {
+        final cacheTracks = cachedQueueForAA.items.map((qi) => qi.track).toList();
+        final cacheIndex = cachedQueueForAA.currentIndex ?? 0;
+        audioHandler.syncQueueToMediaSession(this, cacheTracks, cacheIndex);
+        _logger.log('🚗 AA reconnect: pre-synced queue from cache (${cacheTracks.length} tracks)');
+      }
 
       final serverQueue = await getQueue(playerId);
       if (serverQueue != null && serverQueue.items.isNotEmpty) {
