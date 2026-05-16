@@ -285,6 +285,9 @@ class PcmAudioPlayer {
     if (_state == PcmPlayerState.error) return;
 
     // Real audio arriving — cancel any active silence padding immediately
+    if (_silencePaddingFed > 0) {
+      _logger.log('PcmAudioPlayer: Audio resumed after ${_silencePaddingFed} silence chunk(s) — silence→audio transition');
+    }
     _silencePaddingFed = 0;
 
     // Handle audio arriving during paused/transitional states
@@ -336,7 +339,7 @@ class PcmAudioPlayer {
 
   /// Auto-recover from paused state when audio arrives unexpectedly
   Future<void> _autoRecoverFromPause() async {
-    _logger.log('PcmAudioPlayer: Auto-recovering from pause');
+    _logger.log('PcmAudioPlayer: Auto-recovering from pause (buffer: ${_audioBuffer.length} chunks, userPaused: $_userPaused)');
 
     try {
       // Re-initialize the native player

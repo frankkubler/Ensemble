@@ -2751,7 +2751,8 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('🎵 Sendspin: Ignoring stream/start (AA disconnected ${DateTime.now().difference(aaDisc).inMilliseconds}ms ago)');
       return;
     }
-    _logger.log('🎵 Sendspin: Stream starting');
+    final pcmState = _pcmAudioPlayer?.state.name ?? 'null';
+    _logger.log('🎵 Sendspin: Stream starting (PCM state: $pcmState, isBuiltinActive: $_isBuiltinPlayerActive)');
 
     // Ensure PCM player is initialized and ready
     if (_pcmAudioPlayer == null || _pcmAudioPlayer!.state == PcmPlayerState.idle) {
