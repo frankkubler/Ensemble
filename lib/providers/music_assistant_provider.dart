@@ -2752,7 +2752,7 @@ class MusicAssistantProvider with ChangeNotifier {
       return;
     }
     final pcmState = _pcmAudioPlayer?.state.name ?? 'null';
-    _logger.log('🎵 Sendspin: Stream starting (PCM state: $pcmState, isBuiltinActive: $_isBuiltinPlayerActive)');
+    _logger.log('🎵 Sendspin: Stream starting (PCM state: $pcmState, sendspinConnected: $_sendspinConnected)');
 
     // Ensure PCM player is initialized and ready
     if (_pcmAudioPlayer == null || _pcmAudioPlayer!.state == PcmPlayerState.idle) {
