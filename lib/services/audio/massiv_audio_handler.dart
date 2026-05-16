@@ -93,6 +93,10 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   Timer? _interruptionDebounceTimer;
   DateTime? _interruptionBeganAt;  // Timestamp for interruption duration logging
 
+  // Callback: PCM/Sendspin volume duck (0.0–1.0). Set by MusicAssistantProvider.
+  // Used instead of _player.setVolume() because just_audio is idle in Sendspin mode.
+  Function(double)? onDuck;
+
   // Custom control for switching players
   static final _switchPlayerControl = MediaControl.custom(
     androidIcon: 'drawable/ic_switch_player',
