@@ -224,7 +224,22 @@ class PcmAudioPlayer {
       return;
     }
 
-    if (_audioBuffer.isEmpty) return;
+    if (_audioBuffer.isEmpty) {
+      // Silence padding exhausted and buffer still empty: let the native AudioTrack
+      // drain to silence would cause an audible underrun glitch.
+      // Instead, stop the native player cleanly — auto-recovery will restart it
+      // transparently when the next audio frame arrives.
+      if (_isStarted && !_isAutoRecovering) {
+        _logger.log('PcmAudioPlayer: Silence padding exhausted — stopping native player cleanly to prevent underrun glitch');
+        _isStarted = false;
+        _state = PcmPlayerState.paused;  // _userPaused stays false → auto-recovery on next frame
+        pcm.FlutterPcmSound.setFeedCallback(null);
+        unawaited(pcm.FlutterPcmSound.release().catchError((e) {
+          _logger.log('PcmAudioPlayer: Error releasing after silence exhaustion: $e');
+        }));
+      }
+      return;
+    }
     _feedNextChunk();
   }
 
@@ -342,6 +357,9 @@ class PcmAudioPlayer {
     _logger.log('PcmAudioPlayer: Auto-recovering from pause (buffer: ${_audioBuffer.length} chunks, userPaused: $_userPaused)');
 
     try {
+      // Ensure any previous native instance is fully released before re-setup
+      // (guards against overlap when triggered after silence-exhaustion clean stop).
+      await pcm.FlutterPcmSound.release().catchError((_) {});
       // Re-initialize the native player
       await pcm.FlutterPcmSound.setup(
         sampleRate: _format.sampleRate,
@@ -616,8 +634,7 @@ class PcmAudioPlayer {
       _logger.log('PcmAudioPlayer: Resumed playback');
       return true;
     } else if (_state == PcmPlayerState.ready) {
-      await _startPlayback();
-      _logger.log('PcmAudioPlayer: Started playback');
+      await _startPlayback();  // _startPlayback() already logs 'Started playback'
 
       // Start feeding
       if (!_isFeeding && _audioBuffer.isNotEmpty) {
