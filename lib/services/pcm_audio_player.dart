@@ -111,6 +111,14 @@ class PcmAudioPlayer {
   static const int _silencePaddingMaxChunks = 32; // 32 × 25ms = 800ms
   int _silencePaddingFed = 0;
 
+  // Soft-start ramp: fades audio in from gain=0 → 1 over the first N chunks
+  // of a new stream, preventing a hard click when PCM samples jump from
+  // silence to an arbitrary amplitude. Auto-armed in _startPlayback() and
+  // whenever audio resumes after a silence-padding gap.
+  int _softStartRampChunksRemaining = 0;
+  int _softStartRampTotalChunks = 0;
+  double _rampGain = 1.0; // independent multiplier; does not override _volumeGain
+
   // Silence injection threshold: inject only when the mSamples queue is truly
   // empty (remainingFrames == 0).  IMPORTANT: `remainingFrames` measures the
   // depth of the Dart→Java mSamples queue, NOT the AudioTrack hardware buffer.
@@ -163,6 +171,16 @@ class PcmAudioPlayer {
   /// Set software volume gain (0.0 = silent, 1.0 = full). Applied to PCM samples at feed time.
   void setVolumeGain(double gain) {
     _volumeGain = gain.clamp(0.0, 1.0);
+  }
+
+  /// Arm a soft fade-in ramp: _rampGain rises linearly from 0 → 1 over [chunks]
+  /// feed calls. The effective per-sample gain is _volumeGain × _rampGain.
+  /// Auto-armed by _startPlayback() and on silence→audio resume.
+  void armSoftStartRamp({int chunks = 3}) {
+    _softStartRampTotalChunks = chunks;
+    _softStartRampChunksRemaining = chunks;
+    _rampGain = 0.0;
+    _logger.log('PcmAudioPlayer: armSoftStartRamp ($chunks chunks)');
   }
 
   /// Check if feeding should be blocked
@@ -351,6 +369,9 @@ class PcmAudioPlayer {
     // Real audio arriving — cancel any active silence padding immediately
     if (_silencePaddingFed > 0) {
       _logger.log('PcmAudioPlayer: Audio resumed after ${_silencePaddingFed} silence chunk(s) — silence→audio transition');
+      // Re-arm a 2-chunk ramp so the silence→audio boundary fades in cleanly
+      // instead of jumping straight to full amplitude.
+      armSoftStartRamp(chunks: 2);
     }
     _silencePaddingFed = 0;
 
@@ -447,6 +468,9 @@ class PcmAudioPlayer {
     // true or the guard in _onFeedRequested blocks the first feed → underrun
     // → audible crackle. Reset to false only on error.
     _isStarted = true;
+    // Fade in from silence to avoid a hard click when the first PCM samples
+    // jump from 0 to arbitrary amplitude (applied per-chunk in _feedNextChunk).
+    armSoftStartRamp(chunks: 3);
 
     try {
       await pcm.FlutterPcmSound.start();
@@ -518,11 +542,19 @@ class PcmAudioPlayer {
                !_shouldBlockFeeding) {
           final chunk = _audioBuffer.removeAt(0);
           final rawSamples = _bytesToInt16List(chunk);
-          if (_volumeGain == 1.0) {
+          // Advance soft-start ramp: increase _rampGain 0 → 1 over first N chunks
+          if (_softStartRampChunksRemaining > 0) {
+            _softStartRampChunksRemaining--;
+            _rampGain = (_softStartRampTotalChunks - _softStartRampChunksRemaining) /
+                _softStartRampTotalChunks;
+            if (_softStartRampChunksRemaining == 0) _rampGain = 1.0;
+          }
+          final effectiveGain = _volumeGain * _rampGain;
+          if (effectiveGain == 1.0) {
             allSamples.addAll(rawSamples);
           } else {
             allSamples.addAll(
-                rawSamples.map((s) => (s * _volumeGain).round().clamp(-32768, 32767)));
+                rawSamples.map((s) => (s * effectiveGain).round().clamp(-32768, 32767)));
           }
           bytesConsumed += chunk.length;
           chunksConsumed++;
@@ -713,6 +745,9 @@ class PcmAudioPlayer {
 
     // Clear our buffer - no more data will be fed
     _audioBuffer.clear();
+    // Reset ramp so next track starts at full gain
+    _softStartRampChunksRemaining = 0;
+    _rampGain = 1.0;
 
     // Clear feed callback to prevent native from triggering more feeds
     pcm.FlutterPcmSound.setFeedCallback(null);
@@ -792,6 +827,8 @@ class PcmAudioPlayer {
     _playbackStartTime = null;
     _userPaused = false;        // Reset so silence padding works on next track
     _silencePaddingFed = 0;     // Reset padding counter for next stream
+    _softStartRampChunksRemaining = 0;
+    _rampGain = 1.0;
     _logger.log('PcmAudioPlayer: Stopped playback');
 
     // Re-initialize for next playback
