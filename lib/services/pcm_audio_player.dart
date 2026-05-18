@@ -67,6 +67,7 @@ class PcmAudioPlayer {
   // Audio buffer for smooth playback
   final List<Uint8List> _audioBuffer = [];
   bool _isFeeding = false;
+  bool _isFeedingSilence = false; // separate lock for silence injection
   bool _isStarted = false;
   bool _isAutoRecovering = false;  // Tracks auto-recovery from setup errors
   bool _userPaused = false;  // True when pause is user-initiated (not transitional)
@@ -97,8 +98,11 @@ class PcmAudioPlayer {
 
   // Require a preroll buffer before starting playback to ensure the native player
   // has enough data on the first feed cycle.
-  // 6 chunks × 25ms = 150ms of audio before start().
-  static const int _minChunksBeforeStart = 6;
+  // 16 chunks × 25ms = 400ms of audio before start().
+  // A larger preroll reduces the risk of mSamples underrunning during brief
+  // system stalls (camera open, screen wake) at the cost of a slightly later
+  // start (acceptable trade-off vs. audible crackle).
+  static const int _minChunksBeforeStart = 16;
 
   // Maximum buffer size to prevent memory overflow (~20 seconds of audio)
   // At 48kHz stereo 16-bit: 192KB/sec, so ~3.8MB for 20 seconds
@@ -312,10 +316,17 @@ class PcmAudioPlayer {
 
   /// Feed a single 25ms silence chunk directly to flutter_pcm_sound.
   /// Does NOT touch _audioBuffer, so real audio is never delayed.
+  ///
+  /// IMPORTANT: This method intentionally does NOT check or set _isFeeding.
+  /// When a regular feed() call is stalled in the platform channel (e.g. due
+  /// to camera open / screen wake stalling the Android main thread), _isFeeding
+  /// is true and we cannot push real audio. However, we MUST still inject at
+  /// least one silence chunk so that _silencePaddingFed becomes > 0. That flag
+  /// is what triggers armSoftStartRamp() in _onAudioData when real audio
+  /// resumes, producing a smooth fade-in instead of a hard click after the gap.
   Future<void> _feedSilenceChunk() async {
-    if (_isFeeding) return;
-    _isFeeding = true;
-    _feedCompleter = Completer<void>();
+    if (_isFeedingSilence) return;
+    _isFeedingSilence = true;
     try {
       // 25ms of silence: sampleRate × channels × 0.025s samples (Int16)
       final samplesPerChunk = _format.sampleRate * _format.channels * 25 ~/ 1000;
@@ -324,8 +335,7 @@ class PcmAudioPlayer {
     } catch (e) {
       _logger.log('PcmAudioPlayer: Silence feed error: $e');
     } finally {
-      _isFeeding = false;
-      _feedCompleter?.complete();
+      _isFeedingSilence = false;
     }
   }
 
@@ -748,6 +758,7 @@ class PcmAudioPlayer {
     // Reset ramp so next track starts at full gain
     _softStartRampChunksRemaining = 0;
     _rampGain = 1.0;
+    _isFeedingSilence = false;
 
     // Clear feed callback to prevent native from triggering more feeds
     pcm.FlutterPcmSound.setFeedCallback(null);
@@ -829,6 +840,7 @@ class PcmAudioPlayer {
     _silencePaddingFed = 0;     // Reset padding counter for next stream
     _softStartRampChunksRemaining = 0;
     _rampGain = 1.0;
+    _isFeedingSilence = false;
     _logger.log('PcmAudioPlayer: Stopped playback');
 
     // Re-initialize for next playback
