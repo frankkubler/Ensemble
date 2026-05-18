@@ -351,10 +351,6 @@ class PcmAudioPlayer {
     // Real audio arriving — cancel any active silence padding immediately
     if (_silencePaddingFed > 0) {
       _logger.log('PcmAudioPlayer: Audio resumed after ${_silencePaddingFed} silence chunk(s) — silence→audio transition');
-      // Re-arm a short soft-start ramp so the silence→audio boundary fades in
-      // from gain=0 instead of jumping straight to full volume.  Without this,
-      // the first non-zero sample after silence produces a click at gain 1.0.
-      armSoftStartRamp(chunks: 2);
     }
     _silencePaddingFed = 0;
 
