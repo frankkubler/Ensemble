@@ -2785,10 +2785,23 @@ class MusicAssistantProvider with ChangeNotifier {
       }
     }
 
-    // CRITICAL: Reset paused state when stream starts
-    // This clears _isPausePending and sets state to playing
-    // so that _onAudioData will process incoming audio
-    await _pcmAudioPlayer!.play();
+    // A rapid stream/end -> stream/start can arrive while PCM is still pausing.
+    // Starting during a transitional state fails ("operation in progress"),
+    // which drops the first chunks and causes silence-injection clicks.
+    // Wait briefly for transition completion before trying play().
+    if (_pcmAudioPlayer!.isTransitioning) {
+      _logger.log('🎵 Sendspin: stream/start waiting for PCM transition (${_pcmAudioPlayer!.state.name})');
+      for (int i = 0; i < 25 && _pcmAudioPlayer!.isTransitioning; i++) {
+        await Future.delayed(const Duration(milliseconds: 20));
+      }
+      _logger.log('🎵 Sendspin: transition wait done, PCM state=${_pcmAudioPlayer!.state.name}');
+    }
+
+    final started = await _pcmAudioPlayer!.play();
+    if (!started) {
+      _logger.log('⚠️ Sendspin: stream/start aborted — PCM play() returned false (state=${_pcmAudioPlayer!.state.name})');
+      return;
+    }
 
     // Reset position for new stream (new track)
     _pcmAudioPlayer!.resetPosition();
