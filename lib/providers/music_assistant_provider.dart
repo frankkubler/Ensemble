@@ -2797,6 +2797,9 @@ class MusicAssistantProvider with ChangeNotifier {
       _logger.log('🎵 Sendspin: transition wait done, PCM state=${_pcmAudioPlayer!.state.name}');
     }
 
+    // Smooth the first PCM chunks of the new stream to avoid click/pop at
+    // transition boundaries (old stream tail -> new stream head).
+    _pcmAudioPlayer!.armSoftStartRamp(chunks: 3);
     final started = await _pcmAudioPlayer!.play();
     if (!started) {
       _logger.log('⚠️ Sendspin: stream/start aborted — PCM play() returned false (state=${_pcmAudioPlayer!.state.name})');

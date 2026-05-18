@@ -121,6 +121,10 @@ class PcmAudioPlayer {
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
 
+  // Short fade-in on stream start to avoid click/pop from waveform discontinuity.
+  int _softStartRampChunksRemaining = 0;
+  int _softStartRampTotalChunks = 0;
+
   // Feed callback diagnostic counter — used to throttle verbose logging
   int _feedCallbackCount = 0;
   int _lastLoggedFeedCallback = 0;
@@ -161,6 +165,15 @@ class PcmAudioPlayer {
   /// Set software volume gain (0.0 = silent, 1.0 = full). Applied to PCM samples at feed time.
   void setVolumeGain(double gain) {
     _volumeGain = gain.clamp(0.0, 1.0);
+  }
+
+  /// Arm a short soft-start ramp for the next fed chunks.
+  /// Useful after stream/start to reduce click/pop at the transition boundary.
+  void armSoftStartRamp({int chunks = 3}) {
+    final clamped = chunks.clamp(1, 12);
+    _softStartRampTotalChunks = clamped;
+    _softStartRampChunksRemaining = clamped;
+    _logger.log('PcmAudioPlayer: Soft-start ramp armed (${clamped} chunks)');
   }
 
   /// Check if feeding should be blocked
@@ -516,12 +529,7 @@ class PcmAudioPlayer {
                !_shouldBlockFeeding) {
           final chunk = _audioBuffer.removeAt(0);
           final rawSamples = _bytesToInt16List(chunk);
-          if (_volumeGain == 1.0) {
-            allSamples.addAll(rawSamples);
-          } else {
-            allSamples.addAll(
-                rawSamples.map((s) => (s * _volumeGain).round().clamp(-32768, 32767)));
-          }
+          allSamples.addAll(_applyGainWithOptionalRamp(rawSamples));
           bytesConsumed += chunk.length;
           chunksConsumed++;
         }
@@ -602,6 +610,38 @@ class PcmAudioPlayer {
     }
 
     return samples;
+  }
+
+  /// Apply software gain and optional short start ramp to avoid transition clicks.
+  List<int> _applyGainWithOptionalRamp(List<int> rawSamples) {
+    if (rawSamples.isEmpty) return const <int>[];
+
+    // Fast path: no gain and no ramp.
+    if (_volumeGain == 1.0 && _softStartRampChunksRemaining <= 0) {
+      return rawSamples;
+    }
+
+    final out = <int>[];
+    out.length = rawSamples.length;
+
+    if (_softStartRampChunksRemaining > 0 && _softStartRampTotalChunks > 0) {
+      final processedChunks = _softStartRampTotalChunks - _softStartRampChunksRemaining;
+      final denom = rawSamples.length <= 1 ? 1 : rawSamples.length - 1;
+      for (int i = 0; i < rawSamples.length; i++) {
+        final sampleProgress = i / denom;
+        final globalProgress = ((processedChunks + sampleProgress) / _softStartRampTotalChunks)
+            .clamp(0.0, 1.0);
+        final gain = _volumeGain * globalProgress;
+        out[i] = (rawSamples[i] * gain).round().clamp(-32768, 32767);
+      }
+      _softStartRampChunksRemaining--;
+      return out;
+    }
+
+    for (int i = 0; i < rawSamples.length; i++) {
+      out[i] = (rawSamples[i] * _volumeGain).round().clamp(-32768, 32767);
+    }
+    return out;
   }
 
   /// Stop feeding data to the native player immediately.
