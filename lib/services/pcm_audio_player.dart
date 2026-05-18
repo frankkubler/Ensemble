@@ -111,12 +111,14 @@ class PcmAudioPlayer {
   static const int _silencePaddingMaxChunks = 32; // 32 × 25ms = 800ms
   int _silencePaddingFed = 0;
 
-  // Minimum native buffer level (in frames) below which silence injection is
-  // allowed. With _feedThreshold = 192000 (4s), _onFeedRequested fires early
-  // while the native AudioTrack still has seconds of audio. Injecting silence
-  // at that point creates an audible click in the middle of the stream.
-  // Only inject once the native buffer is truly low (< 1s = 48000 frames).
-  static const int _silenceInjectionThreshold = 48000; // 1s @ 48kHz
+  // Silence injection threshold: inject only when the mSamples queue is truly
+  // empty (remainingFrames == 0).  IMPORTANT: `remainingFrames` measures the
+  // depth of the Dart→Java mSamples queue, NOT the AudioTrack hardware buffer.
+  // The hardware buffer has an additional ~20ms of runway after mSamples hits 0.
+  // Setting this to 0 means we only inject silence when the Java playback thread
+  // would actually block on mSamples.take() — any positive value injects silence
+  // while real audio is still being written to AudioTrack, creating a false gap.
+  static const int _silenceInjectionThreshold = 0;
 
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
@@ -349,6 +351,10 @@ class PcmAudioPlayer {
     // Real audio arriving — cancel any active silence padding immediately
     if (_silencePaddingFed > 0) {
       _logger.log('PcmAudioPlayer: Audio resumed after ${_silencePaddingFed} silence chunk(s) — silence→audio transition');
+      // Re-arm a short soft-start ramp so the silence→audio boundary fades in
+      // from gain=0 instead of jumping straight to full volume.  Without this,
+      // the first non-zero sample after silence produces a click at gain 1.0.
+      armSoftStartRamp(chunks: 2);
     }
     _silencePaddingFed = 0;
 
