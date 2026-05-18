@@ -120,17 +120,6 @@ class PcmAudioPlayer {
 
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
-  double _appliedVolumeGain = 1.0;
-
-  // Short fade-in on stream start to avoid click/pop from waveform discontinuity.
-  int _softStartRampChunksRemaining = 0;
-  int _softStartRampTotalChunks = 0;
-
-  // Short fade-out on stream end to avoid click/pop when release() cuts the buffer.
-  // Processed synchronously inside _feedNextChunk — no async delay, no race with stream/start.
-  int _softStopRampChunksRemaining = 0;
-  int _softStopRampTotalChunks = 0;
-  bool _pendingAutoPause = false;  // Set by stop ramp; cleared by auto-pause or play() cancel
 
   // Feed callback diagnostic counter — used to throttle verbose logging
   int _feedCallbackCount = 0;
@@ -172,30 +161,6 @@ class PcmAudioPlayer {
   /// Set software volume gain (0.0 = silent, 1.0 = full). Applied to PCM samples at feed time.
   void setVolumeGain(double gain) {
     _volumeGain = gain.clamp(0.0, 1.0);
-  }
-
-  /// Arm a short soft-start ramp for the next fed chunks.
-  /// Useful after stream/start to reduce click/pop at the transition boundary.
-  void armSoftStartRamp({int chunks = 3}) {
-    final clamped = chunks.clamp(1, 12);
-    _softStartRampTotalChunks = clamped;
-    _softStartRampChunksRemaining = clamped;
-    _logger.log('PcmAudioPlayer: Soft-start ramp armed (${clamped} chunks)');
-  }
-
-  /// Arm a short soft-stop ramp. The feed loop will fade out over [chunks] chunks
-  /// (~25 ms each), then automatically call pause() — no async delay, no window
-  /// where state is ambiguous for an incoming stream/start.
-  ///
-  /// If play() is called while the ramp is in progress (rapid stream/end → stream/start),
-  /// the ramp is cancelled and the new stream takes over immediately.
-  void armSoftStopRamp({int chunks = 2}) {
-    if (_state != PcmPlayerState.playing) return;
-    final clamped = chunks.clamp(1, 8);
-    _softStopRampTotalChunks = clamped;
-    _softStopRampChunksRemaining = clamped;
-    _pendingAutoPause = false;
-    _logger.log('PcmAudioPlayer: Soft-stop ramp armed (${clamped} chunks)');
   }
 
   /// Check if feeding should be blocked
@@ -540,8 +505,7 @@ class PcmAudioPlayer {
     try {
       while (_audioBuffer.isNotEmpty &&
              _state == PcmPlayerState.playing &&
-             !_shouldBlockFeeding &&
-             !_pendingAutoPause) {
+             !_shouldBlockFeeding) {
         // Collect up to _maxChunksPerFeed chunks into one contiguous sample list.
         final allSamples = <int>[];
         int bytesConsumed = 0;
@@ -552,7 +516,12 @@ class PcmAudioPlayer {
                !_shouldBlockFeeding) {
           final chunk = _audioBuffer.removeAt(0);
           final rawSamples = _bytesToInt16List(chunk);
-          allSamples.addAll(_applyGainWithOptionalRamp(rawSamples));
+          if (_volumeGain == 1.0) {
+            allSamples.addAll(rawSamples);
+          } else {
+            allSamples.addAll(
+                rawSamples.map((s) => (s * _volumeGain).round().clamp(-32768, 32767)));
+          }
           bytesConsumed += chunk.length;
           chunksConsumed++;
         }
@@ -612,15 +581,6 @@ class PcmAudioPlayer {
     _isFeeding = false;
     _feedCompleter?.complete();
     _feedCompleter = null;
-
-    // The soft-stop ramp finished during this feed cycle: auto-pause now that
-    // _isFeeding is false (pause() requires it to be clear).
-    if (_pendingAutoPause) {
-      _pendingAutoPause = false;
-      _softStopRampTotalChunks = 0;
-      _logger.log('PcmAudioPlayer: Auto-pausing after soft-stop ramp');
-      unawaited(pause());
-    }
   }
 
   /// Emit an error to the callback
@@ -642,67 +602,6 @@ class PcmAudioPlayer {
     }
 
     return samples;
-  }
-
-  /// Apply software gain and optional short start/stop ramps to avoid transition clicks.
-  List<int> _applyGainWithOptionalRamp(List<int> rawSamples) {
-    if (rawSamples.isEmpty) return const <int>[];
-
-    // Fast path: no gain, no start ramp, no stop ramp.
-    if (_volumeGain == 1.0 &&
-        _appliedVolumeGain == 1.0 &&
-        _softStartRampChunksRemaining <= 0 &&
-        _softStopRampChunksRemaining <= 0) {
-      return rawSamples;
-    }
-
-    final out = <int>[];
-    out.length = rawSamples.length;
-
-    final hasSoftStartRamp =
-        _softStartRampChunksRemaining > 0 && _softStartRampTotalChunks > 0;
-    final hasSoftStopRamp =
-        _softStopRampChunksRemaining > 0 && _softStopRampTotalChunks > 0;
-    final hasGainTransition = (_appliedVolumeGain - _volumeGain).abs() > 0.0001;
-
-    if (hasSoftStartRamp || hasSoftStopRamp || hasGainTransition) {
-      final processedStartChunks = _softStartRampTotalChunks - _softStartRampChunksRemaining;
-      final denom = rawSamples.length <= 1 ? 1 : rawSamples.length - 1;
-      final gainStart = _appliedVolumeGain;
-      final gainEnd = _volumeGain;
-      for (int i = 0; i < rawSamples.length; i++) {
-        final sampleProgress = i / denom;
-        // Smooth gain transition (duck/unduck, or gain restored after ramp)
-        final transitionGain = gainStart + (gainEnd - gainStart) * sampleProgress;
-        // Fade-in ramp: 0 → 1 over N start chunks
-        final softStartGain = hasSoftStartRamp
-            ? ((processedStartChunks + sampleProgress) / _softStartRampTotalChunks).clamp(0.0, 1.0)
-            : 1.0;
-        // Fade-out ramp: 1 → 0 over N stop chunks (remaining decreases each chunk)
-        final softStopGain = hasSoftStopRamp
-            ? ((_softStopRampChunksRemaining - sampleProgress) / _softStopRampTotalChunks).clamp(0.0, 1.0)
-            : 1.0;
-        final gain = transitionGain * softStartGain * softStopGain;
-        out[i] = (rawSamples[i] * gain).round().clamp(-32768, 32767);
-      }
-      if (hasSoftStartRamp) {
-        _softStartRampChunksRemaining--;
-      }
-      if (hasSoftStopRamp) {
-        _softStopRampChunksRemaining--;
-        if (_softStopRampChunksRemaining <= 0) {
-          _pendingAutoPause = true;
-          _logger.log('PcmAudioPlayer: Soft-stop ramp complete — auto-pause pending');
-        }
-      }
-      _appliedVolumeGain = _volumeGain;
-      return out;
-    }
-
-    for (int i = 0; i < rawSamples.length; i++) {
-      out[i] = (rawSamples[i] * _volumeGain).round().clamp(-32768, 32767);
-    }
-    return out;
   }
 
   /// Stop feeding data to the native player immediately.
@@ -748,21 +647,8 @@ class PcmAudioPlayer {
       return false;
     }
 
-    // If a soft-stop ramp is in progress (stream/end fade-out), cancel it and let
-    // the new stream take over without waiting for pause(). Clear the Dart buffer
-    // so no tail from the old stream bleeds into the new one.
-    if (_state == PcmPlayerState.playing &&
-        (_softStopRampChunksRemaining > 0 || _pendingAutoPause)) {
-      _softStopRampChunksRemaining = 0;
-      _softStopRampTotalChunks = 0;
-      _pendingAutoPause = false;
-      _appliedVolumeGain = 1.0;  // Reset gain so start ramp interpolates cleanly
-      _audioBuffer.clear();      // Discard old stream tail
-      _logger.log('PcmAudioPlayer: Cancelled soft-stop ramp — new stream starts directly');
-      return true;  // Already playing; new stream data + start ramp will flow normally
-    }
-
     if (_state == PcmPlayerState.paused) {
+      // Resume from pause - need to re-initialize since we released on pause
       _userPaused = false;
       _logger.log('PcmAudioPlayer: Resuming from pause at ${elapsedTime.inSeconds}s');
       _state = PcmPlayerState.resuming;
