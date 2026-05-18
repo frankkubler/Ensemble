@@ -2897,8 +2897,10 @@ class MusicAssistantProvider with ChangeNotifier {
     // Stop notification position timer
     _notificationPositionTimer?.cancel();
 
-    // Pause PCM playback with a tiny fade-out to reduce stop-edge clicks.
-    await _pcmAudioPlayer?.softPause();
+    // Arm a 2-chunk (~50 ms) fade-out ramp. The PCM feed loop will fade to silence
+    // and then auto-pause — no async delay here, so a rapid stream/start can still
+    // cancel the ramp and take over immediately via play().
+    _pcmAudioPlayer?.armSoftStopRamp(chunks: 2);
 
     // Update foreground service to show paused state with last position.
     // Use updateLocalModeNotification (NOT setRemotePlaybackState) to avoid
