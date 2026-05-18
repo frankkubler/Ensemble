@@ -154,6 +154,7 @@ class MusicAssistantProvider with ChangeNotifier {
   // firing until the user explicitly triggers playback again.
   bool _suppressSendspinAutoResume = false;
   bool _isHandlingStreamStart = false;   // Prevents concurrent _handleSendspinStreamStart
+  int _nextStreamSoftStartChunks = 3;    // title=5, radio=3 for next stream/start
 
   // Grace period after AA reconnects: blocks server-pushed stream/start for 3 s.
   // The MA server may automatically resume the Sendspin player as soon as it
@@ -2799,7 +2800,9 @@ class MusicAssistantProvider with ChangeNotifier {
 
     // Smooth the first PCM chunks of the new stream to avoid click/pop at
     // transition boundaries (old stream tail -> new stream head).
-    _pcmAudioPlayer!.armSoftStartRamp(chunks: 3);
+    final rampChunks = _nextStreamSoftStartChunks;
+    _nextStreamSoftStartChunks = 3;
+    _pcmAudioPlayer!.armSoftStartRamp(chunks: rampChunks);
     final started = await _pcmAudioPlayer!.play();
     if (!started) {
       _logger.log('⚠️ Sendspin: stream/start aborted — PCM play() returned false (state=${_pcmAudioPlayer!.state.name})');
@@ -2894,8 +2897,8 @@ class MusicAssistantProvider with ChangeNotifier {
     // Stop notification position timer
     _notificationPositionTimer?.cancel();
 
-    // Pause PCM playback (preserves position) instead of stop (resets position)
-    await _pcmAudioPlayer?.pause();
+    // Pause PCM playback with a tiny fade-out to reduce stop-edge clicks.
+    await _pcmAudioPlayer?.softPause();
 
     // Update foreground service to show paused state with last position.
     // Use updateLocalModeNotification (NOT setRemotePlaybackState) to avoid
@@ -6443,6 +6446,8 @@ class MusicAssistantProvider with ChangeNotifier {
 
   Future<void> playTrack(String playerId, Track track, {bool clearQueue = true}) async {
     try {
+      // Titles are more sensitive to transition clicks than radio.
+      _nextStreamSoftStartChunks = 5;
       await _api?.playTrack(playerId, track, clearQueue: clearQueue);
     } catch (e) {
       final errorInfo = ErrorHandler.handleError(e, context: 'Play track');
@@ -6480,6 +6485,7 @@ class MusicAssistantProvider with ChangeNotifier {
   Future<void> playTracks(String playerId, List<Track> tracks, {int? startIndex, bool clearQueue = true}) async {
     // User explicitly asked to play — allow Sendspin stream/start again
     _suppressSendspinAutoResume = false;
+    _nextStreamSoftStartChunks = 5;
     try {
       await _api?.playTracks(playerId, tracks, startIndex: startIndex, clearQueue: clearQueue);
 
@@ -6500,6 +6506,7 @@ class MusicAssistantProvider with ChangeNotifier {
   Future<void> playRadio(String playerId, Track track) async {
     _suppressSendspinAutoResume = false;
     _aaReconnectGraceUntil = null; // User-initiated — allow Sendspin audio immediately
+    _nextStreamSoftStartChunks = 3;
     final api = _api;
     if (api == null) return;
 
@@ -6562,6 +6569,7 @@ class MusicAssistantProvider with ChangeNotifier {
     _isStartingPlayMedia = true;
     _suppressSendspinAutoResume = false;
     _aaReconnectGraceUntil = null; // User-initiated — allow Sendspin audio immediately
+    _nextStreamSoftStartChunks = 3;
     final api = _api;
     if (api == null) {
       _isStartingPlayMedia = false;

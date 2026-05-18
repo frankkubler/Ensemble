@@ -120,6 +120,7 @@ class PcmAudioPlayer {
 
   // Software volume gain (0.0 = silent, 1.0 = full volume)
   double _volumeGain = 1.0;
+  double _appliedVolumeGain = 1.0;
 
   // Short fade-in on stream start to avoid click/pop from waveform discontinuity.
   int _softStartRampChunksRemaining = 0;
@@ -165,6 +166,19 @@ class PcmAudioPlayer {
   /// Set software volume gain (0.0 = silent, 1.0 = full). Applied to PCM samples at feed time.
   void setVolumeGain(double gain) {
     _volumeGain = gain.clamp(0.0, 1.0);
+  }
+
+  /// Pause with a very short fade-out to reduce stop-edge clicks.
+  Future<bool> softPause({Duration fadeOut = const Duration(milliseconds: 30)}) async {
+    if (_state != PcmPlayerState.playing && _state != PcmPlayerState.pausing) {
+      return pause();
+    }
+    final previousGain = _volumeGain;
+    setVolumeGain(previousGain * 0.05);
+    await Future.delayed(fadeOut);
+    final paused = await pause();
+    setVolumeGain(previousGain);
+    return paused;
   }
 
   /// Arm a short soft-start ramp for the next fed chunks.
@@ -617,24 +631,37 @@ class PcmAudioPlayer {
     if (rawSamples.isEmpty) return const <int>[];
 
     // Fast path: no gain and no ramp.
-    if (_volumeGain == 1.0 && _softStartRampChunksRemaining <= 0) {
+    if (_volumeGain == 1.0 &&
+        _appliedVolumeGain == 1.0 &&
+        _softStartRampChunksRemaining <= 0) {
       return rawSamples;
     }
 
     final out = <int>[];
     out.length = rawSamples.length;
 
-    if (_softStartRampChunksRemaining > 0 && _softStartRampTotalChunks > 0) {
+    final hasSoftStartRamp =
+        _softStartRampChunksRemaining > 0 && _softStartRampTotalChunks > 0;
+    final hasGainTransition = (_appliedVolumeGain - _volumeGain).abs() > 0.0001;
+
+    if (hasSoftStartRamp || hasGainTransition) {
       final processedChunks = _softStartRampTotalChunks - _softStartRampChunksRemaining;
       final denom = rawSamples.length <= 1 ? 1 : rawSamples.length - 1;
+      final gainStart = _appliedVolumeGain;
+      final gainEnd = _volumeGain;
       for (int i = 0; i < rawSamples.length; i++) {
         final sampleProgress = i / denom;
-        final globalProgress = ((processedChunks + sampleProgress) / _softStartRampTotalChunks)
-            .clamp(0.0, 1.0);
-        final gain = _volumeGain * globalProgress;
+        final transitionGain = gainStart + (gainEnd - gainStart) * sampleProgress;
+        final softStartGain = hasSoftStartRamp
+            ? ((processedChunks + sampleProgress) / _softStartRampTotalChunks).clamp(0.0, 1.0)
+            : 1.0;
+        final gain = transitionGain * softStartGain;
         out[i] = (rawSamples[i] * gain).round().clamp(-32768, 32767);
       }
-      _softStartRampChunksRemaining--;
+      if (hasSoftStartRamp) {
+        _softStartRampChunksRemaining--;
+      }
+      _appliedVolumeGain = _volumeGain;
       return out;
     }
 
