@@ -5,8 +5,6 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.media.AudioAttributes;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
@@ -24,6 +22,7 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
+import io.flutter.plugin.common.StandardMethodCodec;
 
 /**
  * FlutterPcmSoundPlugin implements a "one pedal" PCM sound playback mechanism.
@@ -37,7 +36,6 @@ public class FlutterPcmSoundPlugin implements
     private static final int MAX_FRAMES_PER_BUFFER = 200;
 
     private MethodChannel mMethodChannel;
-    private Handler mainThreadHandler = new Handler(Looper.getMainLooper());
     private Thread playbackThread;
     private volatile boolean mShouldCleanup = false;
 
@@ -67,7 +65,27 @@ public class FlutterPcmSoundPlugin implements
     @Override
     public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
         BinaryMessenger messenger = binding.getBinaryMessenger();
-        mMethodChannel = new MethodChannel(messenger, CHANNEL_NAME);
+        // Serve this channel from a dedicated background thread instead of the
+        // Android main thread.
+        //
+        // Every feed() from Dart is handled by onMethodCall, and the OnFeedSamples
+        // callback is dispatched back through the same channel. On the default
+        // (platform-thread) channel, both directions are blocked whenever the main
+        // thread stalls — which is exactly what happens when a heavy activity
+        // starts (camera, Gmail): surface allocation and the activity transition
+        // monopolise the main thread for hundreds of ms.
+        //
+        // The playback thread then drains mSamples, blocks on take(), and AudioTrack
+        // underruns — an audible crackle. No buffer size can prevent it, because the
+        // buffer cannot be refilled while the main thread is blocked. Nor can the
+        // Dart-side silence padding, since it reaches the native player through this
+        // very channel.
+        //
+        // The feed handler only pushes ByteBuffers onto a LinkedBlockingQueue and
+        // touches no UI state, so it is safe off the main thread.
+        BinaryMessenger.TaskQueue taskQueue = messenger.makeBackgroundTaskQueue();
+        mMethodChannel = new MethodChannel(
+            messenger, CHANNEL_NAME, StandardMethodCodec.INSTANCE, taskQueue);
         mMethodChannel.setMethodCallHandler(this);
     }
 
@@ -315,7 +333,13 @@ public class FlutterPcmSoundPlugin implements
             if (isLowBufferEvent || isZeroCrossingEvent) {
                 if (isLowBufferEvent) {mLastLowBufferFeed = totalFeeds;}
                 if (isZeroCrossingEvent) {mLastZeroFeed = totalFeeds;}
-                mainThreadHandler.post(() -> invokeFeedCallback(remainingFrames));
+                // Dispatch straight from the playback thread. The channel now owns a
+                // background task queue, so invokeMethod no longer needs a hop through
+                // the main thread — and must not take one: posting here put the "I need
+                // more data" request at the back of the main-thread message queue, so a
+                // stalled main thread (camera/Gmail starting) meant Dart never learned it
+                // had to feed until the stall ended, long after AudioTrack had underrun.
+                invokeFeedCallback(remainingFrames);
             }
         }
 
