@@ -4,7 +4,11 @@ version '1.0'
 apply plugin: 'com.android.library'
 
 android {
-    compileSdkVersion 33
+    // Aligned with android/app/build.gradle (compileSdk 36, AGP 8.9.1). The
+    // upstream plugin ships compileSdkVersion 33, which AGP 8 rejects once the
+    // Flutter 3.41.x embedding AAR (compiled against a newer SDK) is on the
+    // classpath. Java 1.8 matches the app's compileOptions.
+    compileSdk 36
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
@@ -12,7 +16,7 @@ android {
     }
 
     defaultConfig {
-        minSdkVersion 19
+        minSdkVersion 23
     }
 
     gradle.projectsEvaluated {
