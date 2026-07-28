@@ -37,6 +37,8 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   Function()? onSkipToPrevious;
   Function()? onPlay;
   Function()? onPause;
+  Function()? onSoftPause;
+  Function()? onSoftResume;
   Function()? onSwitchPlayer;
   Function()? onBrowseActivity;
   Function()? onAAConnected;
@@ -86,12 +88,6 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   static const _aaChannel = MethodChannel('com.collotsspot.ensemble/android_auto');
   bool _aaNativeChannelAvailable = true;
   bool _loggedAANativeChannelMissing = false;
-
-  // Debounce timer for transient audio interruptions (camera shutter, notification
-  // tones, etc.). A pause interruption is only acted on if it lasts more than
-  // 800 ms — brief ones are skipped to avoid a full server round-trip stop/restart.
-  Timer? _interruptionDebounceTimer;
-  DateTime? _interruptionBeganAt;  // Timestamp for interruption duration logging
 
   // Callback: PCM/Sendspin volume duck (0.0–1.0). Set by MusicAssistantProvider.
   // Used instead of _player.setVolume() because just_audio is idle in Sendspin mode.
@@ -148,23 +144,22 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             }
             break;
           case AudioInterruptionType.pause:
-            // In Sendspin/PCM mode just_audio is idle so playbackState.value.playing
-            // is always false. Use _isBuiltinPlayerActive as the "was playing" signal
-            // in that case; for remote MA players playbackState is authoritative.
-            _wasPlayingBeforeInterruption =
-                playbackState.value.playing || _isBuiltinPlayerActive;
+            // Only track as "was playing" if actually playing — NOT just because
+            // the builtin player is selected. _isBuiltinPlayerActive is true even
+            // when paused, which caused auto-resume when another app (e.g. Instagram)
+            // released audio focus after the user had manually paused the player.
+            _wasPlayingBeforeInterruption = playbackState.value.playing;
+            // Never release() the PCM player on focus loss — tearing down the
+            // AudioTrack causes an audible click/pop. softPause() mutes it at the
+            // hardware level instead: the Sendspin stream keeps flowing, nothing
+            // is torn down, and restoring focus is instant and silent.
+            // (_player.pause() operates on the inactive just_audio instance only.)
             if (_wasPlayingBeforeInterruption) {
-              // Debounce: ignore transient interruptions (camera shutter, notification
-              // tones…) that last under 800ms. Each full server-side pause/resume
-              // cycle produces two audible clicks; short interruptions should be silent.
-              _interruptionBeganAt = DateTime.now();
-              _interruptionDebounceTimer?.cancel();
-              _interruptionDebounceTimer = Timer(const Duration(milliseconds: 800), () {
-                final duration = DateTime.now().difference(_interruptionBeganAt!);
-                _interruptionDebounceTimer = null;
-                _logger.log('🔊 Audio interruption pause: debounce elapsed (${duration.inMilliseconds}ms) — pausing');
-                onPause?.call();
-              });
+              _player.pause();
+              // Silently pause the PCM AudioTrack — no stream restart, no
+              // round-trip to the MA server. Audio resumes from exactly where
+              // it left off when focus is restored.
+              onSoftPause?.call();
             }
             break;
           case AudioInterruptionType.unknown:
@@ -186,17 +181,6 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
             }
             break;
           case AudioInterruptionType.pause:
-            // If the debounce timer is still pending, the interruption was brief —
-            // cancel the timer and skip both pause and resume to avoid server round-trip.
-            if (_interruptionDebounceTimer != null) {
-              final duration = _interruptionBeganAt != null
-                  ? DateTime.now().difference(_interruptionBeganAt!).inMilliseconds
-                  : -1;
-              _interruptionDebounceTimer!.cancel();
-              _interruptionDebounceTimer = null;
-              _logger.log('🔊 Audio interruption ended after ${duration}ms — skipped (transient, <800ms)');
-              break;
-            }
             if (_suppressResume) {
               _logger.log('🔊 Audio interruption ended but resume suppressed (audio route changed)');
               _suppressResume = false;
@@ -215,7 +199,9 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
               _logger.log('🔊 Audio interruption ended but AA session active — skipping auto-resume');
               break;
             }
-            onPlay?.call();
+            _player.play();
+            // Resume the PCM AudioTrack silently — no server round-trip.
+            onSoftResume?.call();
             break;
           case AudioInterruptionType.unknown:
             break;
@@ -1476,7 +1462,6 @@ class MassivAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   /// Dispose of resources and cancel all subscriptions
   Future<void> dispose() async {
     _queueRefreshTimer?.cancel();
-    _interruptionDebounceTimer?.cancel();
     await _interruptionSubscription?.cancel();
     await _becomingNoisySubscription?.cancel();
     await _playbackEventSubscription?.cancel();
