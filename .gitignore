@@ -31,6 +31,12 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+# Gradle output of vendored plugins under packages/ (the anchored rule above
+# only covers the repository root).
+**/build/
+
+# Pre-built APK: artifacts are produced by CI, not committed.
+dist/*.apk
 
 # Symbolication related
 app.*.symbols
