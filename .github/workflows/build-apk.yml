@@ -13,6 +13,15 @@ on:
       - master
   workflow_dispatch:
 
+# A push to a branch that also has an open PR fires twice: once for `push`
+# (feature/**) and once for `pull_request` (synchronize). Both keys resolve to the
+# branch name here, so the later run cancels the earlier one and only one APK gets
+# built. Note the PR run builds the merge commit while the push run builds the branch
+# as-is; they only differ once the base branch has moved ahead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build APK
