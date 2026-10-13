@@ -84,7 +84,16 @@ Music Assistant Server
 
 - Local playback uses `just_audio` for standard audio formats and `flutter_pcm_sound` for the Sendspin stream.
 - Background playback is mandatory — always use `audio_service` callbacks, never raw audio calls outside the handler.
-- PCM format: typically 44100 Hz / 16-bit / stereo — check `SendspinService` for negotiated parameters.
+- PCM format: 48000 Hz / 16-bit / stereo (`PcmAudioFormat.sendspin`, announced in the
+  `client/hello` handshake at `sendspin_service.dart:259`).
+- `flutter_pcm_sound` is **vendored and patched** under `packages/flutter_pcm_sound`
+  (via `dependency_overrides`). Two native fixes live there, do not undo them:
+  the exit sequence `pause() -> flush() -> stop() -> release()` plus `setVolume(0)`
+  in `cleanup()` (kills the click on every pause/stop), and a background TaskQueue on
+  the method channel (keeps `feed()` out of a stalled main thread).
+- The TaskQueue covers the **incoming** direction only. `OnFeedSamples` must still be
+  posted to the main thread: `invokeMethod` is `@UiThread` and throws anywhere else,
+  which would kill the playback thread and with it the process.
 
 ---
 
@@ -162,10 +171,25 @@ test: add/update tests
 
 ---
 
-## Known Open Issues (April 2026)
+## Known Open Issues (October 2026)
 
-- **`fix/podcast-audiobook-player-issues`** branch: podcast and audiobook player bugs — do not regress playback state management in these flows.
-- **`Android-auto-sound-resolution`** branch: Android Auto audio routing/resolution is still unstable — changes to `SendspinService` or `PcmAudioPlayer` must be tested in AA context.
+- **PCM audio**: the teardown click is fixed natively (vendored plugin). The
+  camera/Gmail crackle is addressed by the background TaskQueue but **is not yet
+  confirmed on device**. If it persists, the remaining bottleneck is the UI isolate,
+  where bytes are converted to Int16 twice per chunk — the next move would be a
+  dedicated isolate for the Sendspin-to-feed path, not a bigger buffer (buffer sizing
+  was tried throughout May 2026 and changed nothing).
+- **`webrtc`** branch: remote access is on hold. The `ma-api` data channel goes
+  one-way after 1-3 minutes; reproduced with two separate WebRTC implementations,
+  which points at the Music Assistant server. See `docs/remote-connection/`.
+- **`Android-auto-sound-resolution`** branch: Android Auto audio routing/resolution is
+  still unstable, and the branch is far behind `master` — changes to `SendspinService`
+  or `PcmAudioPlayer` must be tested in an AA context.
+- **`fix/podcast-audiobook-player-issues`** branch: podcast and audiobook player bugs —
+  do not regress playback state management in these flows.
+- **Music Assistant beta 14** merges multi-protocol players server-side, which makes the
+  Cast-to-Sendspin consolidation in `music_assistant_provider.dart` dead code and
+  invalidates the mappings persisted in the database.
 
 ---
 
