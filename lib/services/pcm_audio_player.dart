@@ -228,7 +228,8 @@ class PcmAudioPlayer {
 
       // Set feed threshold - request more data when buffer has fewer frames
       // Lower threshold = lower latency but more risk of underruns
-      // Using _feedThreshold (5000 frames = ~104ms) for faster pause response
+      // _feedThreshold is 480000 frames (10s @ 48kHz stereo); see its declaration
+      // for why the headroom is deliberately large.
       await pcm.FlutterPcmSound.setFeedThreshold(_feedThreshold);
 
       // Set up feed callback for when buffer needs more data

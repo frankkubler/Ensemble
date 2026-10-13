@@ -1,11 +1,14 @@
 package com.lib.flutter_pcm_sound;
 
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.media.AudioAttributes;
 import android.os.SystemClock;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 
@@ -36,13 +39,15 @@ public class FlutterPcmSoundPlugin implements
     private static final int MAX_FRAMES_PER_BUFFER = 200;
 
     private MethodChannel mMethodChannel;
+    // OnFeedSamples must be dispatched from the main thread: see invokeFeedCallback().
+    private final Handler mainThreadHandler = new Handler(Looper.getMainLooper());
     private Thread playbackThread;
     private volatile boolean mShouldCleanup = false;
 
-    private AudioTrack mAudioTrack;
+    private volatile AudioTrack mAudioTrack;
     private int mNumChannels;
     private int mMinBufferSize;
-    private boolean mDidSetup = false;
+    private volatile boolean mDidSetup = false;
 
     private long mFeedThreshold = 8000;
     private long mTotalFeeds = 0;
@@ -283,6 +288,13 @@ public class FlutterPcmSoundPlugin implements
 
     /**
      * Invokes the 'OnFeedSamples' callback with the number of remaining frames.
+     *
+     * Must run on the main thread. The background TaskQueue installed in
+     * onAttachedToEngine only covers the INCOMING direction: MethodChannel uses it
+     * solely in setMethodCallHandler. Outgoing calls go invokeMethod (@UiThread) ->
+     * DartMessenger.send -> FlutterJNI.dispatchPlatformMessage (@UiThread), whose
+     * ensureRunningOnMainThread() throws a RuntimeException off the main thread --
+     * which would kill the playback thread, and with it the process.
      */
     private void invokeFeedCallback(long remainingFrames) {
         Map<String, Object> response = new HashMap<>();
@@ -295,59 +307,74 @@ public class FlutterPcmSoundPlugin implements
      */
     private void playbackThreadLoop() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
+        // An uncaught throwable in any thread kills the whole process on Android,
+        // so the loop never lets one escape: the track is torn down and playback
+        // goes silent, but the app survives.
+        try {
+            mAudioTrack.play();
 
-        mAudioTrack.play();
-
-        while (!mShouldCleanup) {
-            ByteBuffer data = null;
-            try {
-                data = mSamples.take();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                continue;
-            }
-
-            // write
-            mAudioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);
-
-            long remainingFrames;
-            long totalFeeds;
-            long feedThreshold;
-
-            // grab shared data
-            synchronized (mSamples) {
-                long totalBytes = 0;
-                for (ByteBuffer sampleBuffer : mSamples) {
-                    totalBytes += sampleBuffer.remaining();
+            while (!mShouldCleanup) {
+                ByteBuffer data = null;
+                try {
+                    data = mSamples.take();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    continue;
                 }
-                remainingFrames = totalBytes / (2 * mNumChannels);
-                totalFeeds = mTotalFeeds;
-                feedThreshold = mFeedThreshold;
+
+                // write
+                mAudioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);
+
+                long remainingFrames;
+                long totalFeeds;
+                long feedThreshold;
+
+                // grab shared data
+                synchronized (mSamples) {
+                    long totalBytes = 0;
+                    for (ByteBuffer sampleBuffer : mSamples) {
+                        totalBytes += sampleBuffer.remaining();
+                    }
+                    remainingFrames = totalBytes / (2 * mNumChannels);
+                    totalFeeds = mTotalFeeds;
+                    feedThreshold = mFeedThreshold;
+                }
+
+                // check for events
+                boolean isLowBufferEvent = (remainingFrames <= feedThreshold) && (mLastLowBufferFeed != totalFeeds);
+                boolean isZeroCrossingEvent = (remainingFrames == 0) && (mLastZeroFeed != totalFeeds);
+
+                // send events
+                if (isLowBufferEvent || isZeroCrossingEvent) {
+                    if (isLowBufferEvent) {mLastLowBufferFeed = totalFeeds;}
+                    if (isZeroCrossingEvent) {mLastZeroFeed = totalFeeds;}
+                    // Hop to the main thread: invokeMethod is @UiThread and throws anywhere
+                    // else (see invokeFeedCallback). The TaskQueue added for the camera/Gmail
+                    // crackle only applies to the incoming direction, which is what actually
+                    // mattered: feed() from Dart no longer queues behind a stalled main
+                    // thread. This callback is only a top-up hint — Dart already feeds on
+                    // every Sendspin packet (pcm_audio_player.dart:429-432) from the 1.ui
+                    // isolate, which a blocked platform thread does not stall.
+                    mainThreadHandler.post(() -> invokeFeedCallback(remainingFrames));
+                }
             }
 
-            // check for events
-            boolean isLowBufferEvent = (remainingFrames <= feedThreshold) && (mLastLowBufferFeed != totalFeeds);
-            boolean isZeroCrossingEvent = (remainingFrames == 0) && (mLastZeroFeed != totalFeeds);
-
-            // send events
-            if (isLowBufferEvent || isZeroCrossingEvent) {
-                if (isLowBufferEvent) {mLastLowBufferFeed = totalFeeds;}
-                if (isZeroCrossingEvent) {mLastZeroFeed = totalFeeds;}
-                // Dispatch straight from the playback thread. The channel now owns a
-                // background task queue, so invokeMethod no longer needs a hop through
-                // the main thread — and must not take one: posting here put the "I need
-                // more data" request at the back of the main-thread message queue, so a
-                // stalled main thread (camera/Gmail starting) meant Dart never learned it
-                // had to feed until the stall ended, long after AudioTrack had underrun.
-                invokeFeedCallback(remainingFrames);
+        } catch (Throwable t) {
+            Log.e("FlutterPcmSound", "playback thread aborted", t);
+        } finally {
+            AudioTrack track = mAudioTrack;
+            mAudioTrack = null;
+            if (track != null) {
+                try {
+                    track.pause();   // immediate hardware cutoff — no remaining samples reach the DAC
+                    track.flush();   // purge any samples still in the HAL/kernel buffer
+                    track.stop();    // clean stop (nothing left to drain — no click)
+                    track.release();
+                } catch (Throwable t) {
+                    Log.e("FlutterPcmSound", "AudioTrack teardown failed", t);
+                }
             }
         }
-
-        mAudioTrack.pause();   // immediate hardware cutoff — no remaining samples reach the DAC
-        mAudioTrack.flush();   // purge any samples still in the HAL/kernel buffer
-        mAudioTrack.stop();    // clean stop (nothing left to drain — no click)
-        mAudioTrack.release();
-        mAudioTrack = null;
     }
 
 
