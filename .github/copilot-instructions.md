@@ -84,7 +84,22 @@ Music Assistant Server
 
 - Local playback uses `just_audio` for standard audio formats and `flutter_pcm_sound` for the Sendspin stream.
 - Background playback is mandatory — always use `audio_service` callbacks, never raw audio calls outside the handler.
-- PCM format: typically 44100 Hz / 16-bit / stereo — check `SendspinService` for negotiated parameters.
+- PCM format: 48000 Hz / 16-bit / stereo (`PcmAudioFormat.sendspin`, announced in the
+  `client/hello` handshake at `sendspin_service.dart:259`).
+- `flutter_pcm_sound` is **vendored and patched** under `packages/flutter_pcm_sound`
+  (via `dependency_overrides`). Three native fixes live there, do not undo them:
+  the exit sequence `pause() -> flush() -> stop() -> release()` plus `setVolume(0)`
+  in `cleanup()` (kills the click on every pause/stop); a background TaskQueue on the
+  method channel (keeps `feed()` out of a stalled main thread); and an AudioTrack
+  buffer sized in playback time (`BUFFER_TARGET_MS`) instead of `getMinBufferSize()`.
+- **The AudioTrack buffer is the only one that protects the DAC.** Everything upstream
+  — the Dart `_audioBuffer`, the native `mSamples` queue, and the ~10s of lead the
+  server keeps (`buffer_capacity` is in BYTES, not microseconds) — is worthless once
+  AudioTrack itself runs dry. Resizing those is what May 2026 did, for no effect.
+  If crackle persists, raise `BUFFER_TARGET_MS`; do not touch the upstream buffers.
+- The TaskQueue covers the **incoming** direction only. `OnFeedSamples` must still be
+  posted to the main thread: `invokeMethod` is `@UiThread` and throws anywhere else,
+  which would kill the playback thread and with it the process.
 
 ---
 
@@ -162,10 +177,26 @@ test: add/update tests
 
 ---
 
-## Known Open Issues (April 2026)
+## Known Open Issues (October 2026)
 
-- **`fix/podcast-audiobook-player-issues`** branch: podcast and audiobook player bugs — do not regress playback state management in these flows.
-- **`Android-auto-sound-resolution`** branch: Android Auto audio routing/resolution is still unstable — changes to `SendspinService` or `PcmAudioPlayer` must be tested in AA context.
+- **PCM audio**: the teardown click is fixed natively (vendored plugin). The
+  camera/Instagram/Gmail crackle was NOT fixed by the TaskQueue — confirmed on a
+  Pixel 7 Pro, 2026-10-13. Root cause: AudioTrack was built with
+  `getMinBufferSize()` (~20-40ms at 48kHz), so any preemption of the playback
+  thread longer than that starved the DAC. Now sized at `BUFFER_TARGET_MS` (500ms).
+  `AudioTrack.getUnderrunCount()` is logged under the `FlutterPcmSound` tag whenever
+  it moves — use logcat to measure before changing anything here.
+- **`webrtc`** branch: remote access is on hold. The `ma-api` data channel goes
+  one-way after 1-3 minutes; reproduced with two separate WebRTC implementations,
+  which points at the Music Assistant server. See `docs/remote-connection/`.
+- **`Android-auto-sound-resolution`** branch: Android Auto audio routing/resolution is
+  still unstable, and the branch is far behind `master` — changes to `SendspinService`
+  or `PcmAudioPlayer` must be tested in an AA context.
+- **`fix/podcast-audiobook-player-issues`** branch: podcast and audiobook player bugs —
+  do not regress playback state management in these flows.
+- **Music Assistant beta 14** merges multi-protocol players server-side, which makes the
+  Cast-to-Sendspin consolidation in `music_assistant_provider.dart` dead code and
+  invalidates the mappings persisted in the database.
 
 ---
 

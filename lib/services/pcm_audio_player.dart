@@ -228,7 +228,8 @@ class PcmAudioPlayer {
 
       // Set feed threshold - request more data when buffer has fewer frames
       // Lower threshold = lower latency but more risk of underruns
-      // Using _feedThreshold (5000 frames = ~104ms) for faster pause response
+      // _feedThreshold is 480000 frames (10s @ 48kHz stereo); see its declaration
+      // for why the headroom is deliberately large.
       await pcm.FlutterPcmSound.setFeedThreshold(_feedThreshold);
 
       // Set up feed callback for when buffer needs more data
@@ -794,6 +795,30 @@ class PcmAudioPlayer {
     _state = PcmPlayerState.paused;
     _logger.log('PcmAudioPlayer: Paused playback at ${elapsedTime.inSeconds}s');
     return true;
+  }
+
+  /// Silently pause the AudioTrack without releasing it or notifying the MA server.
+  /// The Sendspin stream continues server-side; buffered samples are preserved.
+  /// Call [softResume] to restart output with zero latency.
+  Future<void> softPause() async {
+    if (_state != PcmPlayerState.playing) return;
+    _logger.log('PcmAudioPlayer: softPause — pausing AudioTrack (no release)');
+    try {
+      await pcm.FlutterPcmSound.softPause();
+    } catch (e) {
+      _logger.log('PcmAudioPlayer: softPause error: $e');
+    }
+  }
+
+  /// Resume AudioTrack output after [softPause].
+  Future<void> softResume() async {
+    if (_state != PcmPlayerState.playing) return;
+    _logger.log('PcmAudioPlayer: softResume — resuming AudioTrack');
+    try {
+      await pcm.FlutterPcmSound.softResume();
+    } catch (e) {
+      _logger.log('PcmAudioPlayer: softResume error: $e');
+    }
   }
 
   /// Stop playback (clears buffer and resets position)

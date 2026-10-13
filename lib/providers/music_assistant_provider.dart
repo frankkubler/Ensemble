@@ -2169,6 +2169,17 @@ class MusicAssistantProvider with ChangeNotifier {
     audioHandler.onDuck = (double gain) {
       _pcmAudioPlayer?.setVolumeGain(gain);
     };
+    // Full focus loss (AudioInterruptionType.pause) is handled natively instead:
+    // softPause mutes the AudioTrack without releasing it, so there is no click
+    // and no server round-trip. Orthogonal to onDuck above.
+    audioHandler.onSoftPause = () {
+      _logger.log('🔊 PCM soft-pause: muting AudioTrack (audio focus lost)');
+      unawaited(_pcmAudioPlayer?.softPause());
+    };
+    audioHandler.onSoftResume = () {
+      _logger.log('🔊 PCM soft-resume: resuming AudioTrack (audio focus restored)');
+      unawaited(_pcmAudioPlayer?.softResume());
+    };
     audioHandler.onSwitchPlayer = () {
       selectNextPlayer();
     };
