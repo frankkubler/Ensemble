@@ -37,6 +37,8 @@ public class FlutterPcmSoundPlugin implements
 {
     private static final String CHANNEL_NAME = "flutter_pcm_sound/methods";
     private static final int MAX_FRAMES_PER_BUFFER = 200;
+    // Playback buffer held by AudioTrack itself, in milliseconds.
+    private static final int BUFFER_TARGET_MS = 500;
 
     private MethodChannel mMethodChannel;
     // OnFeedSamples must be dispatched from the main thread: see invokeFeedCallback().
@@ -47,6 +49,8 @@ public class FlutterPcmSoundPlugin implements
     private volatile AudioTrack mAudioTrack;
     private int mNumChannels;
     private int mMinBufferSize;
+    private int mBufferSize;
+    private int mLastUnderrunCount = 0;
     private volatile boolean mDidSetup = false;
 
     private long mFeedThreshold = 8000;
@@ -130,6 +134,20 @@ public class FlutterPcmSoundPlugin implements
                         return;
                     }
 
+                    // getMinBufferSize() is ~20-40ms at 48kHz, which leaves the DAC no
+                    // margin: any preemption of the playback thread longer than that
+                    // underruns, which is exactly what a camera/Instagram/Gmail launch
+                    // does to a normal-priority thread. Everything upstream (the Dart
+                    // buffer, mSamples, the server's ~10s of lead) is irrelevant once
+                    // this one runs dry, which is why resizing those never helped.
+                    // pause()+flush() still cuts output immediately, so a larger buffer
+                    // costs no stop latency.
+                    int frameSize = mNumChannels * 2; // 16-bit samples
+                    long target = (long) sampleRate * frameSize * BUFFER_TARGET_MS / 1000L;
+                    target -= target % frameSize;
+                    mBufferSize = (int) Math.max((long) mMinBufferSize, target);
+                    mLastUnderrunCount = 0;
+
                     if (Build.VERSION.SDK_INT >= 23) { // Android 6 (Marshmallow) and above
                         mAudioTrack = new AudioTrack.Builder()
                             .setAudioAttributes(new AudioAttributes.Builder()
@@ -141,7 +159,7 @@ public class FlutterPcmSoundPlugin implements
                                     .setSampleRate(sampleRate)
                                     .setChannelMask(channelConfig)
                                     .build())
-                            .setBufferSizeInBytes(mMinBufferSize)
+                            .setBufferSizeInBytes(mBufferSize)
                             .setTransferMode(AudioTrack.MODE_STREAM)
                             .build();
                     } else {
@@ -150,7 +168,7 @@ public class FlutterPcmSoundPlugin implements
                             sampleRate,
                             channelConfig,
                             AudioFormat.ENCODING_PCM_16BIT,
-                            mMinBufferSize,
+                            mBufferSize,
                             AudioTrack.MODE_STREAM);
                     }
 
@@ -338,6 +356,17 @@ public class FlutterPcmSoundPlugin implements
                     remainingFrames = totalBytes / (2 * mNumChannels);
                     totalFeeds = mTotalFeeds;
                     feedThreshold = mFeedThreshold;
+                }
+
+                // Hard evidence of DAC starvation, independent of any Dart-side guess.
+                if (Build.VERSION.SDK_INT >= 24) {
+                    int underruns = mAudioTrack.getUnderrunCount();
+                    if (underruns != mLastUnderrunCount) {
+                        Log.w("FlutterPcmSound", "AudioTrack underrun count " + mLastUnderrunCount
+                            + " -> " + underruns + " (buffer " + mBufferSize + " bytes, "
+                            + remainingFrames + " frames queued)");
+                        mLastUnderrunCount = underruns;
+                    }
                 }
 
                 // check for events
