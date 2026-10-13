@@ -57,9 +57,11 @@ jobs:
       - name: Generate launcher icons
         run: flutter pub run flutter_launcher_icons
 
+      # Blocking on errors only. The project currently has 0 errors but 145
+      # warnings and 689 infos, so making those fatal would just restore
+      # continue-on-error. This way a genuine error fails the build.
       - name: Analyze code
-        run: flutter analyze
-        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Setup signing keystore
         run: |
