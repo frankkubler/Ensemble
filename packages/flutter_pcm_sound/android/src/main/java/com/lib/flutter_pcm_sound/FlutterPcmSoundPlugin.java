@@ -37,8 +37,10 @@ public class FlutterPcmSoundPlugin implements
 {
     private static final String CHANNEL_NAME = "flutter_pcm_sound/methods";
     private static final int MAX_FRAMES_PER_BUFFER = 200;
-    // Playback buffer held by AudioTrack itself, in milliseconds.
-    private static final int BUFFER_TARGET_MS = 500;
+    // Playback buffer held by AudioTrack itself, in milliseconds. 500ms cleared
+    // Instagram, Gmail and WhatsApp's in-app camera on a Pixel 7 Pro; the stock
+    // camera app is a heavier spike still, hence the larger margin.
+    private static final int BUFFER_TARGET_MS = 1500;
 
     private MethodChannel mMethodChannel;
     // OnFeedSamples must be dispatched from the main thread: see invokeFeedCallback().
@@ -149,7 +151,7 @@ public class FlutterPcmSoundPlugin implements
                     mLastUnderrunCount = 0;
 
                     if (Build.VERSION.SDK_INT >= 23) { // Android 6 (Marshmallow) and above
-                        mAudioTrack = new AudioTrack.Builder()
+                        AudioTrack.Builder builder = new AudioTrack.Builder()
                             .setAudioAttributes(new AudioAttributes.Builder()
                                     .setUsage(AudioAttributes.USAGE_MEDIA)
                                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -160,8 +162,18 @@ public class FlutterPcmSoundPlugin implements
                                     .setChannelMask(channelConfig)
                                     .build())
                             .setBufferSizeInBytes(mBufferSize)
-                            .setTransferMode(AudioTrack.MODE_STREAM)
-                            .build();
+                            .setTransferMode(AudioTrack.MODE_STREAM);
+                        if (Build.VERSION.SDK_INT >= 26) {
+                            // Asking for getMinBufferSize() steered AudioFlinger towards the
+                            // fast-mixer path, which is the one that starves first under load.
+                            // POWER_SAVING asks for the deep-buffer output instead: the HAL
+                            // itself keeps larger buffers and wakes up less often, which is
+                            // what music playback wants. Costs output latency, which does not
+                            // matter here — Ensemble applies no clock sync, and pause()+flush()
+                            // still cuts immediately.
+                            builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_POWER_SAVING);
+                        }
+                        mAudioTrack = builder.build();
                     } else {
                         mAudioTrack = new AudioTrack(
                             AudioManager.STREAM_MUSIC,
